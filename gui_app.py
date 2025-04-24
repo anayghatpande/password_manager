@@ -5,6 +5,7 @@ import pyperclip
 from vault_core import derive_key, load_vault, save_vault, verify_master_password
 from password_generator import generate_password
 
+
 class PasswordManagerGUI:
     def __init__(self, root):
         self.root = root
