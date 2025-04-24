@@ -1,6 +1,6 @@
 import getpass
 from vault_core import derive_key, load_vault, save_vault, verify_master_password
-
+# Testing platform for the password vault
 def main():
     print("🔐 Welcome to your password vault.")
     master_password = getpass.getpass("Enter master password: ")
