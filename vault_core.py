@@ -5,9 +5,10 @@ import getpass
 import hashlib
 from cryptography.fernet import Fernet
 
+# can be deleted for the security reason later for the production version
 VAULT_FILE = "password_vault.enc"
 
-# Add this to the top
+# Add this to the top - it will be used to store the master password hash
 MASTER_HASH_FILE = "master.hash"
 
 def save_master_password(master_password: str):
