@@ -3,25 +3,21 @@
 
 block_cipher = None
 
-
-
 a = Analysis(
     ['gui_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('master.hash', '.'), 
-           ('password_vault.enc', '.'), 
-           ('password_generator.py', '.'),  # add any other required files
-          ],
+    datas=[('master.hash', '.'), ('vault_core.py', '.'), ('password_generator.py', '.')],
     hiddenimports=[],
     hookspath=[],
+    hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
+    noarchive=False,
 )
-
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
