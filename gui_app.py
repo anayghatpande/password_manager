@@ -82,7 +82,8 @@ class PasswordManagerGUI:
         search_entry.bind("<KeyRelease>", lambda event: self.refresh_tree())
 
         # Treeview
-        self.tree = ttk.Treeview(self.root, columns=("Username", "Password", "Action"), show="headings")
+        self.tree = ttk.Treeview(self.root, columns=("Service", "Username", "Password", "Action"), show="headings")
+        self.tree.heading("Service", text="Service")
         self.tree.heading("Username", text="Username")
         self.tree.heading("Password", text="Password")
         self.tree.heading("Action", text="Action")
@@ -107,11 +108,13 @@ class PasswordManagerGUI:
             if query in service.lower() or query in creds["username"].lower():
                 is_revealed = self.revealed_rows.get(service, False)
                 password = creds["password"] if is_revealed else "●●●●●●●●"
-                action = "Show" if not is_revealed else "Hide"
+                action = "Hide" if is_revealed else "Show"
 
-                self.tree.insert("", "end", iid=service, values=(creds["username"], password, action))
+                # Use service as the iid, and set all 4 columns
+                self.tree.insert("", "end", iid=service, values=(service, creds["username"], password, action))
 
         self.tree.bind("<ButtonRelease-1>", self.toggle_password)
+
 
     def toggle_password(self, event=None):
         selected_item = self.tree.selection()
@@ -119,21 +122,37 @@ class PasswordManagerGUI:
         if not selected_item:
             return
 
-        item = selected_item[0]
+        item_id = selected_item[0]
         col = self.tree.identify_column(event.x)
-        
-        if col != "#3":
+
+        if col != "#4":  # Action column is #4
             return
 
-        service = self.tree.item(item)
-        current_action = service['values'][2]
+        service_key = item_id  # The iid is the service name
 
-        if current_action == "Show":
-            self.revealed_rows[service['values'][0]] = True
-            self.tree.item(item, values=(service['values'][0], self.vault[service['values'][0]]["password"], "Hide"))
-        elif current_action == "Hide":
-            self.revealed_rows[service['values'][0]] = False
-            self.tree.item(item, values=(service['values'][0], "●●●●●●●●", "Show"))
+        if service_key not in self.vault:
+            messagebox.showerror("Error", f"Service '{service_key}' not found in vault.")
+            return
+
+        is_revealed = self.revealed_rows.get(service_key, False)
+
+        if is_revealed:
+            self.revealed_rows[service_key] = False
+            self.tree.item(service_key, values=(
+                service_key,
+                self.vault[service_key]["username"],
+                "●●●●●●●●",
+                "Show"
+            ))
+        else:
+            self.revealed_rows[service_key] = True
+            self.tree.item(service_key, values=(
+                service_key,
+                self.vault[service_key]["username"],
+                self.vault[service_key]["password"],
+                "Hide"
+            ))
+
 
     def add_entry(self):
         service = simpledialog.askstring("Service Name", "Enter service name:")
