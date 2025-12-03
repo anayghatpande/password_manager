@@ -5,9 +5,9 @@
 
 Enjoy the offline password manager! :D
 
-============================================================
-    Anay's Password Vault v1.0
-============================================================
+
+## Password Vault v1.0
+
 
 Built with Python 3.9.13
 
@@ -57,6 +57,4 @@ TROUBLESHOOTING:
   - Face not detected: Ensure good lighting
   - Antivirus blocking: Add exception for the app
 
-============================================================
-    Created by Anay Ghatpande
-============================================================
+
