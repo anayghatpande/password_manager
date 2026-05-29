@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.0 (YYYY-MM-DD)
+
+- Renamed app to PasswordVault (display name, exe, data dir)
+- Build outputs PasswordVault.exe via spec file
+
 ## v1.1.0 (YYYY-MM-DD)
 
 - First-run setup wizard with step-by-step guidance

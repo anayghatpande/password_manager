@@ -193,7 +193,7 @@ class PasswordManagerGUI:
                                            bg=BG_LIGHT)
         self.face_status_label.pack(pady=(2, 0))
 
-        tk.Label(container, text="v3.1 — Offline & Secure",
+        tk.Label(container, text="v1.2 — Offline & Secure",
                  font=self.font_small, fg=TEXT_GREY,
                  bg=BG_LIGHT).pack(pady=(20, 0))
 

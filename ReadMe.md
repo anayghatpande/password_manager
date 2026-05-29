@@ -49,7 +49,7 @@ python gui_app.py
 .\app_builder.ps1
 ```
 
-The compiled `.exe` will be placed in the `exported_app/` directory.
+The compiled `PasswordVault.exe` will be placed in the `dist/` directory.
 
 ---
 

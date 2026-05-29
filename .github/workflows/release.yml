@@ -33,25 +33,19 @@ jobs:
           pip install pyinstaller
 
       - name: Build executable
-        run: |
-          pyinstaller --onefile --windowed `
-            --distpath "exported_app" `
-            --add-data "vault_core.py;." `
-            --add-data "password_generator.py;." `
-            --add-data "face_auth.py;." `
-            gui_app.py
+        run: pyinstaller PasswordVault.spec
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PasswordVault-${{ github.ref_name }}
-          path: exported_app/gui_app.exe
+          path: dist/PasswordVault.exe
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           name: Password Vault ${{ github.ref_name }}
           body_path: CHANGELOG.md
-          files: exported_app/gui_app.exe
+          files: dist/PasswordVault.exe
           draft: false
           prerelease: false

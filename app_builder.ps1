@@ -4,10 +4,12 @@ cd (Split-Path -Parent $MyInvocation.MyCommand.Path)
 # Debug: Show working directory
 Write-Host "Current Directory: $(Get-Location)"
 
-# Run PyInstaller
-pyinstaller --onefile --windowed `
-  --distpath "exported_app" `
-  --add-data "vault_core.py;." `
-  --add-data "password_generator.py;." `
-  --add-data "face_auth.py;." `
-  gui_app.py
+# Build with PyInstaller spec file
+pyinstaller PasswordVault.spec
+
+# Copy the output to exported_app folder
+if (Test-Path "dist\PasswordVault.exe") {
+    New-Item -ItemType Directory -Force -Path "exported_app" | Out-Null
+    Copy-Item "dist\PasswordVault.exe" "exported_app\PasswordVault.exe" -Force
+    Write-Host "✅ Built: exported_app\PasswordVault.exe"
+}
