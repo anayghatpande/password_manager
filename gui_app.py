@@ -126,6 +126,11 @@ class PasswordManagerGUI:
         """Display the login screen with master password and face auth options."""
         self._clear_screen()
         self.face_status_label = None
+
+        # First-run detection — show setup wizard instead
+        if not os.path.exists(MASTER_HASH_FILE):
+            self._show_setup_wizard()
+            return
         container = tk.Frame(self.root, bg=BG_LIGHT)
         container.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -312,37 +317,245 @@ class PasswordManagerGUI:
                 parent=self.root
             )
 
-    def verify_master_password(self, first_run=False):
+    # ====== SETUP WIZARD ======
+
+    def _show_setup_wizard(self):
+        """Step-by-step setup wizard for first-time users."""
+        self._clear_screen()
+
+        wizard = tk.Frame(self.root, bg=BG_LIGHT)
+        wizard.place(relx=0.5, rely=0.5, anchor="center")
+
+        steps = [
+            ("Welcome", "Set Password", "Recovery Codes", "Face (Optional)", "Done")
+        ]
+        current_step = [0]
+
+        # Data collected during setup
+        setup_pw = [None]
+        setup_codes = [None]
+
+        def _render():
+            for w in wizard.winfo_children():
+                w.destroy()
+
+            # Step indicator
+            step_bar = tk.Frame(wizard, bg=BG_LIGHT)
+            step_bar.pack(pady=(0, 15))
+            for i, s in enumerate(steps[0]):
+                color = PRIMARY if i < current_step[0] else (HEADER_TEAL if i == current_step[0] else BORDER)
+                fg_color = BG_WHITE if i <= current_step[0] else TEXT_GREY
+                tk.Label(step_bar, text=f"  {s}  ", font=self.font_small, bg=color, fg=fg_color, padx=6, pady=2).pack(side=tk.LEFT, padx=2)
+
+            step = current_step[0]
+            if step == 0:
+                _welcome()
+            elif step == 1:
+                _set_password()
+            elif step == 2:
+                _show_codes()
+            elif step == 3:
+                _face_enroll()
+            elif step == 4:
+                _finish()
+
+        def _welcome():
+            tk.Label(wizard, text="👋", font=(self.font_normal[0], 56), bg=BG_LIGHT).pack(pady=(0, 5))
+            tk.Label(wizard, text="Welcome to Password Vault!",
+                     font=self.font_title, fg=HEADER_TEAL, bg=BG_LIGHT).pack(pady=5)
+            tk.Label(wizard, text="Your offline, encrypted password manager.\n\n"
+                     "We'll guide you through setup in just a few steps.",
+                     font=self.font_subtitle, fg=TEXT_GREY, bg=BG_LIGHT,
+                     justify="center").pack(pady=(0, 20))
+            tk.Button(wizard, text="  Let's Go!  ",
+                      command=lambda: _next(), bg=PRIMARY, fg=BG_WHITE,
+                      font=self.font_button, bd=0, padx=30, pady=10,
+                      cursor="hand2").pack(pady=10)
+
+        def _set_password():
+            tk.Label(wizard, text="🔑", font=(self.font_normal[0], 48), bg=BG_LIGHT).pack(pady=(0, 5))
+            tk.Label(wizard, text="Create Your Master Password",
+                     font=self.font_title, fg=HEADER_TEAL, bg=BG_LIGHT).pack(pady=5)
+            tk.Label(wizard, text="This is the only password you need to remember.\n"
+                     "Make it strong — there is no password reset.",
+                     font=self.font_subtitle, fg=TEXT_GREY, bg=BG_LIGHT,
+                     justify="center").pack(pady=(0, 15))
+
+            pw_frame = tk.Frame(wizard, bg=BG_WHITE, highlightbackground=BORDER,
+                                highlightthickness=1)
+            pw_frame.pack(pady=5, ipadx=5, ipady=5)
+            tk.Label(pw_frame, text="Password:", font=self.font_normal,
+                     bg=BG_WHITE).pack(side=tk.LEFT, padx=10)
+            pw_e = tk.Entry(pw_frame, show="*", font=self.font_normal,
+                            width=25, bd=0)
+            pw_e.pack(side=tk.LEFT, padx=10, pady=8)
+
+            cf_frame = tk.Frame(wizard, bg=BG_WHITE, highlightbackground=BORDER,
+                                highlightthickness=1)
+            cf_frame.pack(pady=5, ipadx=5, ipady=5)
+            tk.Label(cf_frame, text="Confirm: ", font=self.font_normal,
+                     bg=BG_WHITE).pack(side=tk.LEFT, padx=10)
+            cf_e = tk.Entry(cf_frame, show="*", font=self.font_normal,
+                            width=25, bd=0)
+            cf_e.pack(side=tk.LEFT, padx=10, pady=8)
+
+            error_lbl = tk.Label(wizard, text="", font=self.font_small,
+                                 fg=DANGER, bg=BG_LIGHT)
+            error_lbl.pack(pady=(5, 0))
+
+            strength_lbl = tk.Label(wizard, text="", font=self.font_small,
+                                    bg=BG_LIGHT)
+            strength_lbl.pack()
+
+            pw_e.focus_set()
+            pw_e.bind("<Return>", lambda e: cf_e.focus_set())
+            cf_e.bind("<Return>", lambda e: _do_set())
+
+            def _on_pw_key(*_):
+                pw = pw_e.get()
+                if len(pw) < 4:
+                    strength_lbl.config(text="", fg="")
+                elif len(pw) < 8:
+                    strength_lbl.config(text="Weak", fg=DANGER)
+                elif len(pw) < 12:
+                    strength_lbl.config(text="Medium", fg=WARNING)
+                else:
+                    strength_lbl.config(text="Strong", fg=PRIMARY)
+            pw_e.bind("<KeyRelease>", _on_pw_key)
+
+            def _do_set():
+                pw = pw_e.get()
+                confirm = cf_e.get()
+                if not pw:
+                    error_lbl.config(text="Please enter a password.")
+                    return
+                if len(pw) < 4:
+                    error_lbl.config(text="Password must be at least 4 characters.")
+                    return
+                if pw != confirm:
+                    error_lbl.config(text="Passwords do not match.")
+                    return
+                save_master_password(pw)
+                setup_pw[0] = pw
+                setup_codes[0] = generate_recovery_codes(pw)
+                _next()
+
+            btn_f = tk.Frame(wizard, bg=BG_LIGHT)
+            btn_f.pack(pady=10)
+            tk.Button(btn_f, text="← Back", command=_prev, bg=BG_LIGHT,
+                      fg=TEXT_DARK, font=self.font_normal, bd=0, padx=15,
+                      pady=5, cursor="hand2").pack(side=tk.LEFT, padx=5)
+            tk.Button(btn_f, text="Continue →", command=_do_set,
+                      bg=PRIMARY, fg=BG_WHITE, font=self.font_button,
+                      bd=0, padx=20, pady=8, cursor="hand2").pack(side=tk.LEFT, padx=5)
+
+        def _show_codes():
+            tk.Label(wizard, text="🔐", font=(self.font_normal[0], 48),
+                     bg=BG_LIGHT).pack(pady=(0, 5))
+            tk.Label(wizard, text="Recovery Codes",
+                     font=self.font_title, fg=HEADER_TEAL, bg=BG_LIGHT).pack(pady=5)
+            tk.Label(wizard, text="Save these somewhere safe! Each code works ONCE\nto unlock your vault if you forget your password.",
+                     font=self.font_subtitle, fg=TEXT_GREY, bg=BG_LIGHT,
+                     justify="center").pack(pady=(0, 10))
+
+            codes_box = tk.Frame(wizard, bg=BG_WHITE, highlightbackground=WARNING,
+                                 highlightthickness=2)
+            codes_box.pack(pady=5, ipadx=20, ipady=10)
+            for c in setup_codes[0]:
+                tk.Label(codes_box, text=f"  {c}", font=("Consolas", 12, "bold"),
+                         fg=TEXT_DARK, bg=BG_WHITE).pack(anchor="w")
+
+            tk.Label(wizard, text="⚠️  These codes will NOT be shown again.",
+                     font=self.font_small, fg=DANGER, bg=BG_LIGHT).pack(pady=(5, 5))
+
+            btn_f = tk.Frame(wizard, bg=BG_LIGHT)
+            btn_f.pack(pady=10)
+            tk.Button(btn_f, text="← Back", command=_prev, bg=BG_LIGHT,
+                      fg=TEXT_DARK, font=self.font_normal, bd=0, padx=15,
+                      pady=5, cursor="hand2").pack(side=tk.LEFT, padx=5)
+            tk.Button(btn_f, text="I Saved Them →", command=_next,
+                      bg=PRIMARY, fg=BG_WHITE, font=self.font_button,
+                      bd=0, padx=20, pady=8, cursor="hand2").pack(side=tk.LEFT, padx=5)
+
+        def _face_enroll():
+            tk.Label(wizard, text="📸", font=(self.font_normal[0], 48),
+                     bg=BG_LIGHT).pack(pady=(0, 5))
+            tk.Label(wizard, text="Face Unlock (Optional)",
+                     font=self.font_title, fg=HEADER_TEAL, bg=BG_LIGHT).pack(pady=5)
+            tk.Label(wizard, text="Enabling face unlock lets you open your vault\n"
+                     "just by looking at the camera.",
+                     font=self.font_subtitle, fg=TEXT_GREY, bg=BG_LIGHT,
+                     justify="center").pack(pady=(0, 15))
+
+            btn_f = tk.Frame(wizard, bg=BG_LIGHT)
+            btn_f.pack(pady=5)
+
+            def _do_enroll():
+                from face_auth import FaceAuthDialog
+                fd = FaceAuthDialog(self.root)
+                if fd.run_enrollment():
+                    self.root.after(500, _wait_for_enroll(fd))
+
+            def _wait_for_enroll(fd):
+                def _check():
+                    if is_face_registered():
+                        save_vault_key_for_face(self.key)
+                        messagebox.showinfo("Success", "Face enrolled successfully!",
+                                            parent=self.root)
+                    _next()
+                self.root.after(100, _check)
+
+            tk.Button(btn_f, text="📸  Enroll Now", command=_do_enroll,
+                      bg=HEADER_TEAL, fg=BG_WHITE, font=self.font_button,
+                      bd=0, padx=20, pady=8, cursor="hand2").pack(pady=5)
+            tk.Button(wizard, text="Skip, I'll do it later",
+                      command=_next, bg=BG_LIGHT, fg=TEXT_GREY,
+                      font=self.font_normal, bd=0, cursor="hand2").pack(pady=5)
+
+            btn_b = tk.Frame(wizard, bg=BG_LIGHT)
+            btn_b.pack(pady=10)
+            tk.Button(btn_b, text="← Back", command=_prev, bg=BG_LIGHT,
+                      fg=TEXT_DARK, font=self.font_normal, bd=0, padx=15,
+                      pady=5, cursor="hand2").pack(side=tk.LEFT, padx=5)
+
+        def _finish():
+            pw = setup_pw[0]
+            self.master_pw = pw
+            self.key = derive_key(pw)
+            try:
+                self.vault = load_vault(self.key)
+            except Exception:
+                self.vault = {}
+            if is_face_registered():
+                save_vault_key_for_face(self.key)
+            tk.Label(wizard, text="✅", font=(self.font_normal[0], 56),
+                     bg=BG_LIGHT).pack(pady=(0, 5))
+            tk.Label(wizard, text="All Set!",
+                     font=self.font_title, fg=HEADER_TEAL, bg=BG_LIGHT).pack(pady=5)
+            tk.Label(wizard, text="Your vault is ready to use.\n"
+                     "Start adding your passwords!",
+                     font=self.font_subtitle, fg=TEXT_GREY, bg=BG_LIGHT,
+                     justify="center").pack(pady=(0, 20))
+            self.root.after(1500, self.main_screen)
+
+        def _next():
+            current_step[0] += 1
+            _render()
+
+        def _prev():
+            if current_step[0] > 0:
+                current_step[0] -= 1
+                _render()
+
+        _render()
+
+    def verify_master_password(self):
         self._update_activity()
         pw = self.master_password_var.get()
         if not pw:
             messagebox.showerror("Error", "Please enter a password.", parent=self.root)
             return
-        if not os.path.exists(MASTER_HASH_FILE) or first_run:
-            confirm = simpledialog.askstring(
-                "Set Master Password",
-                "Confirm master password:",
-                show="*", parent=self.root
-            )
-            if not confirm:
-                return
-            if pw != confirm:
-                messagebox.showerror("Error", "Passwords do not match.", parent=self.root)
-                return
-            save_master_password(pw)
-
-            # Generate recovery codes on first setup
-            codes = generate_recovery_codes(pw)
-            codes_text = "\n".join(f"  {c}" for c in codes)
-            messagebox.showinfo(
-                "Recovery Codes",
-                "YOUR RECOVERY CODES (save these somewhere safe!):\n\n"
-                f"{codes_text}\n\n"
-                "Each code can be used ONCE to access your vault\n"
-                "if you forget your master password.",
-                parent=self.root
-            )
-        elif not verify_master_password(pw):
+        if not verify_master_password(pw):
             messagebox.showerror("Access Denied", "Incorrect master password.", parent=self.root)
             return
         self.master_pw = pw
@@ -353,7 +566,6 @@ class PasswordManagerGUI:
             logger.error(f"Vault load failed: {e}")
             messagebox.showerror("Error", "Vault corrupted or invalid password.", parent=self.root)
             return
-        # Save vault key for face unlock if face is enrolled
         if is_face_registered():
             save_vault_key_for_face(self.key)
         self.main_screen()
