@@ -12,10 +12,10 @@ from cryptography.fernet import Fernet
 # --- Data Directory ---
 if sys.platform == "win32":
     _BASE = os.environ.get("APPDATA", os.path.expanduser("~"))
-    DATA_DIR = os.path.join(_BASE, "AnaysPasswordVault")
+    DATA_DIR = os.path.join(_BASE, "PasswordVault")
 else:
     _BASE = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
-    DATA_DIR = os.path.join(_BASE, "anays-password-vault")
+    DATA_DIR = os.path.join(_BASE, "password-vault")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 

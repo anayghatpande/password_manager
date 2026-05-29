@@ -1,5 +1,5 @@
 """
-Anay's Password Vault — Optimized GUI
+Password Vault — Optimized GUI
 Modern UI with face recognition, keyboard shortcuts, edit capabilities, inline password generation,
 and a polished user experience.
 """
@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("PasswordVault")
 
 # --- Constants ---
-APP_NAME = "Anay's Password Vault"
+APP_NAME = "Password Vault"
 PRIMARY = "#4CAF50"
 PRIMARY_DARK = "#388E3C"
 SECONDARY = "#FF5722"
@@ -137,7 +137,7 @@ class PasswordManagerGUI:
         # Icon
         tk.Label(container, text="🔐", font=(self.font_normal[0], 48),
                  bg=BG_LIGHT).pack(pady=(0, 5))
-        tk.Label(container, text="Welcome to Anay's Password Vault",
+        tk.Label(container, text="Welcome to Password Vault",
                  font=self.font_title, fg=HEADER_TEAL,
                  bg=BG_LIGHT).pack(pady=5)
         tk.Label(container, text="Enter your master password or use face recognition",
@@ -579,7 +579,7 @@ class PasswordManagerGUI:
         header = tk.Frame(self.root, bg=HEADER_TEAL, height=56)
         header.pack(fill="x")
         header.pack_propagate(False)
-        tk.Label(header, text="🔐  Anay's Password Vault", font=(self.font_normal[0], 16, "bold"), fg=BG_WHITE, bg=HEADER_TEAL).pack(side=tk.LEFT, padx=20, pady=12)
+        tk.Label(header, text="🔐  Password Vault", font=(self.font_normal[0], 16, "bold"), fg=BG_WHITE, bg=HEADER_TEAL).pack(side=tk.LEFT, padx=20, pady=12)
         tk.Button(header, text="🔒 Lock", command=self._lock_vault, bg=HEADER_TEAL, fg=BG_WHITE, font=(self.font_normal[0], 10), bd=0, padx=12, cursor="hand2", activebackground="#2E7D7B").pack(side=tk.RIGHT, padx=15, pady=10)
 
         # -- Search Bar --
