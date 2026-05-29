@@ -1,60 +1,115 @@
-# Build the password manager in exe file
-- Make sure you have installed python 3.7.9 on your system.
-- Before running the app run ```pip install -r requirements.txt```
-- Run ```.\app_builder.ps1 ``` to export the app into .exe
+# Password Vault
 
-Enjoy the offline password manager! :D
+[![CI](https://github.com/anayghatpande/password_manager/actions/workflows/ci.yml/badge.svg)](https://github.com/anayghatpande/password_manager/actions/workflows/ci.yml)
+[![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+An offline password manager with **AES-256 encryption**, **face recognition unlock**, and **recovery codes** — built with Python & Tkinter.
 
-## Password Vault v1.0
+---
 
+## Features
 
-Built with Python 3.9.13
+- **AES-256 encryption** — all passwords encrypted with `cryptography`'s Fernet (PBKDF2-derived keys)
+- **Face recognition unlock** — 3-tier authentication using OpenCV LBPH + Haar cascades
+  - **Full confidence** (< 60 distance) → auto-unlock without master password
+  - **Partial confidence** (60–70) → master password still required
+  - **Failed** (≥ 70) → fallback to master password or recovery code
+- **Recovery codes** — 5 one-time codes generated at setup; each code PBKDF2-hashed and one-time-use
+- **Password generator** — cryptographically secure (`secrets` module), customizable length
+- **Search & filter** — instant vault search
+- **Fully offline** — no internet connection required; all data stays local
 
-INSTALLATION:
-  No installation required! Just run PasswordVault.exe
+---
 
-FIRST TIME SETUP:
-  1. Run the application
-  2. Register your face (5 photos required)
-  3. Set up your master password
-  4. Optionally set up a Quick PIN for faster login
+## Quick Start
 
-FEATURES:
-  * Secure password storage (AES-256 encryption)
-  * Face recognition authentication
-  * Liveness detection (blink detection - anti-spoofing)
-  * Quick PIN unlock (when face confidence >= 80%)
-  * Master password fallback
-  * Search and filter passwords
-  * Password generator
+### Prerequisites
 
-AUTHENTICATION MODES:
-  1. Face Only (80%+ confidence) -> Quick PIN -> Unlock
-  2. Face (60-80% confidence) -> Master Password -> Unlock  
-  3. Master Password Only -> Unlock
+- **Python 3.7 – 3.11**
+- **Webcam** (for face recognition)
 
-FILES CREATED:
-  The app creates a 'face_data' folder containing:
-  - face_encodings.pkl (your face data)
-  - settings.pkl (app settings)
-  - quick_pin.pkl (encrypted PIN)
-  - auth_log.txt (login history)
+### Installation
 
-REQUIREMENTS:
-  - Windows 10/11
-  - Webcam (for face recognition)
+```bash
+git clone https://github.com/anayghatpande/password_manager.git
+cd password_manager
+pip install -r requirements.txt
+```
 
-SECURITY:
-  - All passwords encrypted with AES-256
-  - Face data stored locally only
-  - No internet connection required
-  - Liveness detection prevents photo attacks
+### Run
 
-TROUBLESHOOTING:
-  - App doesn't start: Try running as Administrator
-  - Camera not working: Check webcam connection
-  - Face not detected: Ensure good lighting
-  - Antivirus blocking: Add exception for the app
+```bash
+python gui_app.py
+```
 
+### Build Executable
 
+```powershell
+.\app_builder.ps1
+```
+
+The compiled `.exe` will be placed in the `exported_app/` directory.
+
+---
+
+## First-Time Setup
+
+1. Launch the application
+2. Enroll your face (50 samples captured with liveness checks)
+3. Set a master password
+4. Save your **recovery codes** — they are the only way to reset a forgotten password
+
+---
+
+## Authentication Modes
+
+| Mode | Condition | Result |
+|------|-----------|--------|
+| Face only | Confidence < 60 | Unlock vault directly |
+| Face + password | 60 ≤ confidence < 70 | Unlock after master password |
+| Master password | Face fails or unavailable | Unlock with password |
+| Recovery code | Password forgotten | 5 one-time codes available |
+
+---
+
+## Files Created
+
+| File | Purpose |
+|------|---------|
+| `password_vault.enc` | Encrypted vault (AES-256) |
+| `master.hash` | PBKDF2-hashed master password |
+| `vault.salt` | Salt for key derivation |
+| `recovery_codes.json` | Hashed one-time recovery codes |
+| `face_vault_key.enc` | Encrypted vault key (face-linked) |
+| `face_data/` | OpenCV LBPH training data |
+
+---
+
+## Security
+
+- **Passwords**: encrypted with `cryptography.fernet` (AES-256-CBC + HMAC-SHA256)
+- **Key derivation**: PBKDF2-HMAC-SHA256 with 600,000 iterations
+- **Face data**: processed locally, never transmitted
+- **Recovery codes**: PBKDF2-hashed with per-code salt; one-time-use
+- **No telemetry**: fully offline, no network calls
+
+---
+
+## Development
+
+```bash
+# Install dev dependencies
+pip install pytest
+
+# Run tests
+python -m pytest tests/ -v
+```
+
+Pull requests are welcome. The CI pipeline (`main` branch) runs tests on Python 3.9–3.11.
+
+---
+
+## License
+
+MIT
