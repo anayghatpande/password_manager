@@ -1,578 +1,410 @@
 """
-Face Authentication Module for Anay's Password Vault
-With Liveness Detection and Quick PIN Support
+Face Recognition Authentication Module
+Uses OpenCV Haar Cascade + LBPH Face Recognizer for biometric authentication.
+Stores face encodings locally as an XML model.
 """
 
+import os
+import time
+import hashlib
+import base64
 import cv2
 import numpy as np
-import os
-import pickle
-import hashlib
-import tempfile
-from pathlib import Path
-from datetime import datetime
+import tkinter as tk
+from tkinter import messagebox
+import threading
+import logging
+from typing import Optional
+from cryptography.fernet import Fernet
+from vault_core import DATA_DIR
 
-# Import face_recognition
-try:
-    import face_recognition
-    FACE_RECOGNITION_AVAILABLE = True
-except ImportError:
-    FACE_RECOGNITION_AVAILABLE = False
-    print("[WARNING] face_recognition module not available")
+# Configuration
+FACE_MODEL_FILE = os.path.join(DATA_DIR, "face_model.xml")
+FACE_DATA_FILE = os.path.join(DATA_DIR, "face_data.npz")
+FACE_KEY_FILE = os.path.join(DATA_DIR, "face_vault_key.enc")
+CONFIDENCE_THRESHOLD = 70  # Lower = stricter authentication (0-100, 0=perfect match)
+CONFIDENCE_AUTO_LOGIN = 60  # If confidence < this, skip master password entirely
+FACE_CAPTURE_DELAY = 3  # Seconds between face capture attempts
+BLUR_THRESHOLD = 80  # Lower = less tolerant of blur (Laplacian variance)
+ENROLL_SAMPLES = 50  # Number of face samples to capture for training
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-class FaceAuthenticator:
+def _is_blurry(image, threshold: int = BLUR_THRESHOLD) -> bool:
+    """Check if an image is blurry using variance of Laplacian."""
+    return cv2.Laplacian(image, cv2.CV_64F).var() < threshold
+
+
+def _preprocess_face(face_roi):
+    """Apply histogram equalization for consistent lighting + resize."""
+    equalized = cv2.equalizeHist(face_roi)
+    return cv2.resize(equalized, (200, 200))
+
+
+def _load_face_cascade():
+    """Load the best available Haar cascade for face detection."""
+    paths = [
+        cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml",
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
+    ]
+    for p in paths:
+        cascade = cv2.CascadeClassifier(p)
+        if not cascade.empty():
+            return cascade
+    raise RuntimeError("Failed to load face detection cascade.")
+
+
+def is_face_registered() -> bool:
+    """Check if a face model already exists."""
+    return os.path.exists(FACE_MODEL_FILE) and os.path.exists(FACE_DATA_FILE)
+
+
+def _check_face_support():
+    """Check if OpenCV contrib face module is available. Raises RuntimeError if not."""
+    if not hasattr(cv2, "face") or not hasattr(cv2.face, "LBPHFaceRecognizer_create"):
+        raise RuntimeError(
+            "OpenCV face module not found. Install: pip install opencv-contrib-python"
+        )
+
+
+def capture_face_samples(num_samples: int = ENROLL_SAMPLES) -> list:
     """
-    Face Authentication with:
-    - Liveness detection (blink detection)
-    - Quick PIN for face-only unlock
-    - Configurable security thresholds
+    Capture face samples from webcam for enrollment.
+    Uses preprocessing (histogram equalization) and blur rejection
+    to produce high-quality training data.
+    Returns list of preprocessed face grayscale arrays.
+    Camera is always released, even on error.
     """
-    
-    # Security Levels
-    SECURITY_LOW = 0.50
-    SECURITY_MEDIUM = 0.60
-    SECURITY_HIGH = 0.70
-    SECURITY_FACE_ONLY = 0.80  # Minimum for PIN unlock
-    SECURITY_MAXIMUM = 0.90
-    
-    def __init__(self, data_dir: str = "face_data"):
-        self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(exist_ok=True)
-        
-        # Files
-        self.encodings_file = self.data_dir / "face_encodings.pkl"
-        self.settings_file = self.data_dir / "settings.pkl"
-        self.pin_file = self.data_dir / "quick_pin.pkl"
-        
-        # Temp file
-        self.temp_dir = tempfile.gettempdir()
-        self.temp_image_path = os.path.join(self.temp_dir, "face_auth_temp.jpg")
-        
-        # Face data
-        self.known_face_encodings = []
-        
-        # Security settings
-        self.min_confidence_threshold = self.SECURITY_MEDIUM  # 60% default
-        self.face_only_threshold = 0.80  # 80% for PIN unlock
-        self.max_attempts = 3
-        self.current_attempt = 0
-        
-        # Liveness detection
-        self.liveness_enabled = True
-        self.blink_counter = 0
-        self.blinks_required = 2
-        self.liveness_verified = False
-        self.last_ear = 1.0
-        self.ear_threshold = 0.22
-        self.blink_state = "open"
-        
-        # Quick PIN
-        self.pin_enabled = False
-        
-        # Load data
-        self._load_settings()
-        self.load_encodings()
-        self._load_pin_status()
-        
-        print(f"[FaceAuth] Threshold: {self.min_confidence_threshold * 100:.0f}%")
-        print(f"[FaceAuth] PIN unlock: {'Enabled' if self.pin_enabled else 'Disabled'}")
-        print(f"[FaceAuth] Liveness: {'Enabled' if self.liveness_enabled else 'Disabled'}")
-    
-    # ==================== SETTINGS ====================
-    
-    def _load_settings(self):
-        """Load settings."""
-        if self.settings_file.exists():
-            try:
-                with open(self.settings_file, 'rb') as f:
-                    settings = pickle.load(f)
-                    self.min_confidence_threshold = settings.get('min_confidence_threshold', 0.60)
-                    self.face_only_threshold = settings.get('face_only_threshold', 0.80)
-                    self.max_attempts = settings.get('max_attempts', 3)
-                    self.liveness_enabled = settings.get('liveness_enabled', True)
-                    self.blinks_required = settings.get('blinks_required', 2)
-            except Exception as e:
-                print(f"Settings load error: {e}")
-    
-    def _save_settings(self):
-        """Save settings."""
-        try:
-            settings = {
-                'min_confidence_threshold': self.min_confidence_threshold,
-                'face_only_threshold': self.face_only_threshold,
-                'max_attempts': self.max_attempts,
-                'liveness_enabled': self.liveness_enabled,
-                'blinks_required': self.blinks_required,
-                'pin_enabled': self.pin_enabled
-            }
-            with open(self.settings_file, 'wb') as f:
-                pickle.dump(settings, f)
-            return True
-        except Exception as e:
-            print(f"Settings save error: {e}")
-            return False
-    
-    def set_security_level(self, level: float) -> bool:
-        """Set security level (0.0 to 1.0)."""
-        if 0.0 <= level <= 1.0:
-            self.min_confidence_threshold = level
-            self._save_settings()
-            return True
-        return False
-    
-    def get_security_level(self) -> float:
-        """Get current security level."""
-        return self.min_confidence_threshold
-    
-    def get_security_level_name(self) -> str:
-        """Get security level name."""
-        level = self.min_confidence_threshold
-        if level >= 0.90:
-            return "Maximum"
-        elif level >= 0.80:
-            return "High"
-        elif level >= 0.70:
-            return "Medium-High"
-        elif level >= 0.60:
-            return "Medium"
-        else:
-            return "Low"
-    
-    def set_liveness_enabled(self, enabled: bool):
-        """Enable/disable liveness detection."""
-        self.liveness_enabled = enabled
-        self._save_settings()
-    
-    def set_blinks_required(self, count: int):
-        """Set number of blinks required."""
-        self.blinks_required = max(1, min(5, count))
-        self._save_settings()
-    
-    # ==================== QUICK PIN ====================
-    
-    def setup_quick_pin(self, pin: str) -> tuple:
-        """
-        Setup quick PIN (4-6 digits).
-        
-        Returns:
-            tuple: (success: bool, message: str)
-        """
-        # Validate PIN
-        if not pin.isdigit():
-            return False, "PIN must contain only digits"
-        
-        if len(pin) < 4 or len(pin) > 6:
-            return False, "PIN must be 4-6 digits"
-        
-        try:
-            # Hash PIN with salt
-            salt = os.urandom(16)
-            pin_hash = hashlib.pbkdf2_hmac('sha256', pin.encode(), salt, 100000)
-            
-            data = {
-                'pin_hash': pin_hash,
-                'salt': salt,
-                'created_at': datetime.now().isoformat()
-            }
-            
-            with open(self.pin_file, 'wb') as f:
-                pickle.dump(data, f)
-            
-            self.pin_enabled = True
-            self._save_settings()
-            
-            return True, "Quick PIN setup successfully!"
-            
-        except Exception as e:
-            return False, f"PIN setup failed: {str(e)}"
-    
-    def verify_pin(self, pin: str) -> tuple:
-        """
-        Verify quick PIN.
-        
-        Returns:
-            tuple: (success: bool, message: str)
-        """
-        if not self.pin_enabled or not self.pin_file.exists():
-            return False, "Quick PIN not enabled"
-        
-        try:
-            with open(self.pin_file, 'rb') as f:
-                data = pickle.load(f)
-            
-            pin_hash = hashlib.pbkdf2_hmac('sha256', pin.encode(), data['salt'], 100000)
-            
-            if pin_hash == data['pin_hash']:
-                return True, "PIN verified!"
-            else:
-                return False, "Incorrect PIN"
-                
-        except Exception as e:
-            return False, f"PIN verification failed: {str(e)}"
-    
-    def _load_pin_status(self):
-        """Load PIN enabled status."""
-        self.pin_enabled = self.pin_file.exists()
-    
-    def disable_quick_pin(self) -> bool:
-        """Disable quick PIN."""
-        try:
-            if self.pin_file.exists():
-                self.pin_file.unlink()
-            self.pin_enabled = False
-            self._save_settings()
-            return True
-        except Exception:
-            return False
-    
-    def is_pin_enabled(self) -> bool:
-        """Check if PIN is enabled."""
-        return self.pin_enabled
-    
-    # ==================== LIVENESS DETECTION ====================
-    
-    def _calculate_ear(self, eye_points):
-        """Calculate Eye Aspect Ratio."""
-        try:
-            # Vertical distances
-            A = np.linalg.norm(np.array(eye_points[1]) - np.array(eye_points[5]))
-            B = np.linalg.norm(np.array(eye_points[2]) - np.array(eye_points[4]))
-            # Horizontal distance
-            C = np.linalg.norm(np.array(eye_points[0]) - np.array(eye_points[3]))
-            
-            ear = (A + B) / (2.0 * C) if C > 0 else 0
-            return ear
-        except Exception:
-            return 0.3
-    
-    def check_liveness_frame(self, frame) -> tuple:
-        """
-        Check single frame for liveness (blink detection).
-        
-        Returns:
-            tuple: (is_verified: bool, blink_count: int, message: str)
-        """
-        if not self.liveness_enabled:
-            return True, 0, "Liveness disabled"
-        
-        if self.liveness_verified:
-            return True, self.blink_counter, "Already verified"
-        
-        if not FACE_RECOGNITION_AVAILABLE:
-            return True, 0, "Skipped"
-        
-        try:
-            # Save and load image
-            cv2.imwrite(self.temp_image_path, frame)
-            image = face_recognition.load_image_file(self.temp_image_path)
-            
-            # Get face landmarks
-            landmarks_list = face_recognition.face_landmarks(image)
-            
-            if not landmarks_list:
-                return False, self.blink_counter, "No face for liveness"
-            
-            landmarks = landmarks_list[0]
-            
-            # Get eyes
-            left_eye = landmarks.get('left_eye', [])
-            right_eye = landmarks.get('right_eye', [])
-            
-            if len(left_eye) < 6 or len(right_eye) < 6:
-                return False, self.blink_counter, "Eyes not detected"
-            
-            # Calculate EAR
-            left_ear = self._calculate_ear(left_eye)
-            right_ear = self._calculate_ear(right_eye)
-            avg_ear = (left_ear + right_ear) / 2.0
-            
-            # Detect blink
-            if avg_ear < self.ear_threshold:
-                if self.blink_state == "open":
-                    self.blink_state = "closed"
-            else:
-                if self.blink_state == "closed":
-                    self.blink_counter += 1
-                    self.blink_state = "open"
-            
-            self.last_ear = avg_ear
-            
-            # Check if enough blinks
-            if self.blink_counter >= self.blinks_required:
-                self.liveness_verified = True
-                return True, self.blink_counter, f"Liveness verified! ({self.blink_counter} blinks)"
-            
-            remaining = self.blinks_required - self.blink_counter
-            return False, self.blink_counter, f"Blink {remaining} more time(s)"
-            
-        except Exception as e:
-            # Don't block on liveness errors
-            return True, 0, f"Liveness check skipped: {str(e)[:20]}"
-    
-    def reset_liveness(self):
-        """Reset liveness detection state."""
-        self.blink_counter = 0
-        self.liveness_verified = False
-        self.blink_state = "open"
-        self.last_ear = 1.0
-    
-    def is_liveness_verified(self) -> bool:
-        """Check if liveness is verified."""
-        return not self.liveness_enabled or self.liveness_verified
-    
-    # ==================== FACE ENCODING ====================
-    
-    def load_encodings(self) -> bool:
-        """Load face encodings."""
-        if self.encodings_file.exists():
-            try:
-                with open(self.encodings_file, 'rb') as f:
-                    self.known_face_encodings = pickle.load(f)
-                return True
-            except Exception:
-                return False
-        return False
-    
-    def save_encodings(self) -> bool:
-        """Save face encodings."""
-        try:
-            with open(self.encodings_file, 'wb') as f:
-                pickle.dump(self.known_face_encodings, f)
-            return True
-        except Exception:
-            return False
-    
-    def is_registered(self) -> bool:
-        """Check if face is registered."""
-        return len(self.known_face_encodings) > 0 and FACE_RECOGNITION_AVAILABLE
-    
-    def get_registration_count(self) -> int:
-        """Get number of face samples."""
-        return len(self.known_face_encodings)
-    
-    def _load_image_reliable(self, frame):
-        """Reliable image loading."""
-        if not FACE_RECOGNITION_AVAILABLE:
-            return None
-        try:
-            cv2.imwrite(self.temp_image_path, frame)
-            return face_recognition.load_image_file(self.temp_image_path)
-        except Exception:
-            return None
-    
-    def detect_and_encode_face(self, frame):
-        """Detect and encode face."""
-        if not FACE_RECOGNITION_AVAILABLE:
-            return None, None, "Not available"
-        
-        image = self._load_image_reliable(frame)
-        if image is None:
-            return None, None, "Image load failed"
-        
-        try:
-            locations = face_recognition.face_locations(image, model="hog")
-            
-            if len(locations) == 0:
-                return None, None, "No face detected"
-            if len(locations) > 1:
-                return None, None, "Multiple faces"
-            
-            encodings = face_recognition.face_encodings(image, locations)
-            
-            if len(encodings) == 0:
-                return None, None, "Encoding failed"
-            
-            return encodings[0], locations[0], None
-            
-        except Exception as e:
-            return None, None, str(e)
-    
-    def register_face_from_frame(self, frame) -> tuple:
-        """Register face from frame."""
-        encoding, location, error = self.detect_and_encode_face(frame)
-        
-        if error:
-            return False, error
-        
-        self.known_face_encodings.append(encoding)
-        self.save_encodings()
-        
-        # Save image
-        try:
-            img_path = self.data_dir / f"registration_{len(self.known_face_encodings)}.jpg"
-            cv2.imwrite(str(img_path), frame)
-        except Exception:
-            pass
-        
-        return True, f"Sample {len(self.known_face_encodings)} registered!"
-    
-    # ==================== FACE VERIFICATION ====================
-    
-    def verify_face_from_frame(self, frame) -> tuple:
-        """
-        Verify face from frame.
-        
-        Returns:
-            tuple: (success: bool, confidence: float, message: str, can_use_pin: bool)
-        """
-        if not FACE_RECOGNITION_AVAILABLE:
-            return False, 0, "Not available", False
-        
-        if not self.is_registered():
-            return False, 0, "No face registered", False
-        
-        # Check liveness first (if enabled)
-        if self.liveness_enabled and not self.liveness_verified:
-            is_live, blinks, msg = self.check_liveness_frame(frame)
-            if not is_live:
-                return False, 0, msg, False
-        
-        encoding, location, error = self.detect_and_encode_face(frame)
-        
-        if error:
-            return False, 0, error, False
-        
-        try:
-            # Calculate confidence
-            distances = face_recognition.face_distance(self.known_face_encodings, encoding)
-            best_distance = min(distances)
-            confidence = (1 - best_distance) * 100
-            confidence = max(0, min(100, confidence))
-            
-            threshold_percent = self.min_confidence_threshold * 100
-            face_only_percent = self.face_only_threshold * 100
-            
-            # Can use PIN if: confidence >= 80% AND liveness verified AND PIN enabled
-            can_use_pin = (
-                confidence >= face_only_percent and
-                self.is_liveness_verified() and
-                self.pin_enabled
+    cap = None
+    try:
+        face_cascade = _load_face_cascade()
+
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            raise RuntimeError("Could not access webcam.")
+
+        samples = []
+        captured = 0
+        rejected = 0
+
+        while captured < num_samples:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, 1.2, 5, minSize=(100, 100))
+
+            for (x, y, w, h) in faces:
+                # Pad ROI slightly for better feature extraction
+                pad = int(min(w, h) * 0.1)
+                x1, y1 = max(0, x - pad), max(0, y - pad)
+                x2, y2 = min(frame.shape[1], x + w + pad), min(frame.shape[0], y + h + pad)
+                face_roi = gray[y1:y2, x1:x2]
+
+                # Reject blurry samples
+                if _is_blurry(face_roi):
+                    rejected += 1
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                    cv2.putText(frame, "BLURRY! Hold still...", (x, y - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    continue
+
+                processed = _preprocess_face(face_roi)
+                samples.append(processed)
+                captured += 1
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(
+                    frame,
+                    f"Captured: {captured}/{num_samples}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2,
+                )
+
+            quality_msg = f"Rejected blurry: {rejected}" if rejected else ""
+            cv2.putText(frame, quality_msg, (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.imshow("Face Enrollment - Press 'q' to quit", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+            # Delay between captures so user can reposition
+            if captured > 0 and captured < num_samples:
+                for remaining in range(FACE_CAPTURE_DELAY, 0, -1):
+                    display = frame.copy()
+                    status_color = (0, 255, 0)
+                    cv2.putText(
+                        display,
+                        f"Next capture in {remaining}s - hold still...",
+                        (10, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 255),
+                        2,
+                    )
+                    cv2.putText(
+                        display,
+                        f"Captured: {captured}/{num_samples}",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        status_color,
+                        2,
+                    )
+                    cv2.imshow("Face Enrollment - Press 'q' to quit", display)
+                    if cv2.waitKey(1000) & 0xFF == ord("q"):
+                        raise RuntimeError("Enrollment cancelled by user.")
+
+        if len(samples) < 5:
+            raise RuntimeError("Not enough face samples captured. Need at least 5.")
+
+        logging.info(f"Enrollment complete: {len(samples)} good samples, {rejected} blurry rejected")
+        return samples
+    finally:
+        if cap is not None:
+            cap.release()
+        cv2.destroyAllWindows()
+
+
+def enroll_face():
+    """Enroll user's face: capture samples, train LBPH model, save to file."""
+    _check_face_support()
+    samples = capture_face_samples()
+
+    labels = np.ones(len(samples), dtype=np.int32)
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
+    recognizer.train(samples, labels)
+    recognizer.write(FACE_MODEL_FILE)
+    np.savez(FACE_DATA_FILE, samples=np.array(samples), labels=labels)
+    logging.info("Face model trained and saved successfully.")
+
+
+def authenticate_face(timeout: int = 30) -> str:
+    """
+    Authenticate user by comparing live webcam face to enrolled face model.
+    Uses same preprocessing (histogram equalization) as enrollment for consistent matching.
+    Returns: 'full' (high confidence - skip master password),
+             'partial' (matching but need master password),
+             'failed' (no match)
+    """
+    _check_face_support()
+    if not is_face_registered():
+        raise RuntimeError("No face model found. Please enroll first.")
+
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
+    recognizer.read(FACE_MODEL_FILE)
+
+    face_cascade = _load_face_cascade()
+
+    cap = None
+    try:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            raise RuntimeError("Could not access webcam.")
+
+        start_time = cv2.getTickCount()
+        attempts = 0
+        max_attempts = 15
+        result = 'failed'
+
+        while attempts < max_attempts:
+            elapsed = (cv2.getTickCount() - start_time) / cv2.getTickFrequency()
+            if elapsed > timeout:
+                break
+
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, 1.2, 5, minSize=(100, 100))
+
+            for (x, y, w, h) in faces:
+                attempts += 1
+                face_roi = gray[y : y + h, x : x + w]
+                processed = _preprocess_face(face_roi)
+                label, confidence = recognizer.predict(processed)
+
+                border_color = (0, 255, 0) if confidence < CONFIDENCE_THRESHOLD else (0, 0, 255)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), border_color, 2)
+                cv2.putText(
+                    frame,
+                    f"Confidence: {confidence:.1f}",
+                    (x, y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    border_color,
+                    2,
+                )
+
+                if confidence < CONFIDENCE_AUTO_LOGIN:
+                    result = 'full'
+                    cv2.putText(frame, "MATCH! (Full Access)",
+                                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    cv2.imshow("Face Authentication", frame)
+                    cv2.waitKey(1000)
+                    break
+                elif confidence < CONFIDENCE_THRESHOLD:
+                    result = 'partial'
+                    cv2.putText(frame, "MATCH! (Enter password)",
+                                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                    cv2.imshow("Face Authentication", frame)
+                    cv2.waitKey(1000)
+                    break
+
+            if result != 'failed':
+                break
+
+            cv2.putText(
+                frame,
+                f"Look at camera... ({attempts}/{max_attempts})",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
             )
-            
-            # Log attempt
-            self._log_attempt(confidence >= threshold_percent, confidence, threshold_percent, can_use_pin)
-            
-            if confidence >= threshold_percent:
-                self.current_attempt = 0
-                
-                if can_use_pin:
-                    return True, confidence, f"Verified ({confidence:.0f}%) - PIN unlock available!", True
-                else:
-                    return True, confidence, f"Verified ({confidence:.0f}%)", False
-            else:
-                self.current_attempt += 1
-                remaining = max(0, self.max_attempts - self.current_attempt)
-                return False, confidence, f"Low: {confidence:.0f}% (need {threshold_percent:.0f}%) - {remaining} left", False
-            
+            cv2.imshow("Face Authentication - Press 'q' to quit", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+            time.sleep(0.5)
+
+        return result
+    finally:
+        if cap is not None:
+            cap.release()
+        cv2.destroyAllWindows()
+
+
+def delete_face_data():
+    """Remove stored face model, vault key and data files."""
+    for f in [FACE_MODEL_FILE, FACE_DATA_FILE, FACE_KEY_FILE]:
+        if os.path.exists(f):
+            os.remove(f)
+
+
+def save_vault_key_for_face(vault_key: bytes):
+    """Encrypt and store the vault key, unlockable by face data."""
+    if not os.path.exists(FACE_DATA_FILE):
+        return
+    data = np.load(FACE_DATA_FILE)
+    samples = data['samples']
+    samples_bytes = samples.tobytes()
+    salt = os.urandom(16)
+    face_key = hashlib.pbkdf2_hmac('sha256', samples_bytes, salt, 100000, dklen=32)
+    face_key_b64 = base64.urlsafe_b64encode(face_key)
+    fernet = Fernet(face_key_b64)
+    encrypted_key = fernet.encrypt(vault_key)
+    with open(FACE_KEY_FILE, 'wb') as f:
+        f.write(salt + encrypted_key)
+
+
+def get_vault_key_from_face() -> Optional[bytes]:
+    """Decrypt and return the vault key using enrolled face data."""
+    if not os.path.exists(FACE_KEY_FILE) or not os.path.exists(FACE_DATA_FILE):
+        return None
+    with open(FACE_KEY_FILE, 'rb') as f:
+        data_bytes = f.read()
+    salt = data_bytes[:16]
+    encrypted_key = data_bytes[16:]
+    data = np.load(FACE_DATA_FILE)
+    samples = data['samples']
+    samples_bytes = samples.tobytes()
+    face_key = hashlib.pbkdf2_hmac('sha256', samples_bytes, salt, 100000, dklen=32)
+    face_key_b64 = base64.urlsafe_b64encode(face_key)
+    fernet = Fernet(face_key_b64)
+    try:
+        return fernet.decrypt(encrypted_key)
+    except Exception:
+        return None
+
+
+# ---------- Tkinter Integration ----------
+
+class FaceAuthDialog:
+    """Tkinter dialog for face enrollment and authentication."""
+
+    def __init__(self, parent: tk.Tk):
+        self.parent = parent
+        self.result = 'failed'
+        self.auth_completed = False
+
+    def run_enrollment(self) -> bool:
+        """Run face enrollment in a separate thread with UI feedback."""
+        if not messagebox.askyesno(
+            "Face Enrollment",
+            "This will capture your face using the webcam.\n"
+            "Make sure your face is well-lit and visible.\n\nContinue?",
+            parent=self.parent,
+        ):
+            return False
+
+        threading.Thread(target=self._enroll_thread, daemon=True).start()
+        messagebox.showinfo(
+            "Face Enrollment",
+            "Webcam will open. Look at the camera while we capture your face.\n"
+            "Press 'q' to quit early if needed.",
+            parent=self.parent,
+        )
+        return True
+
+    def _enroll_thread(self):
+        try:
+            enroll_face()
+            self.parent.after(0, self._show_enroll_success)
         except Exception as e:
-            return False, 0, str(e), False
-    
-    def get_face_confidence(self, frame) -> tuple:
-        """Get confidence without counting attempt."""
-        if not FACE_RECOGNITION_AVAILABLE or not self.is_registered():
-            return False, 0, "N/A"
-        
-        encoding, _, error = self.detect_and_encode_face(frame)
-        if error:
-            return False, 0, error
-        
-        try:
-            distances = face_recognition.face_distance(self.known_face_encodings, encoding)
-            confidence = (1 - min(distances)) * 100
-            return True, max(0, min(100, confidence)), "OK"
-        except Exception:
-            return False, 0, "Error"
-    
-    # ==================== UTILITY ====================
-    
-    def reset_attempts(self):
-        """Reset attempts and liveness."""
-        self.current_attempt = 0
-        self.reset_liveness()
-    
-    def is_locked_out(self) -> bool:
-        """Check if locked out."""
-        return self.current_attempt >= self.max_attempts
-    
-    def get_remaining_attempts(self) -> int:
-        """Get remaining attempts."""
-        return max(0, self.max_attempts - self.current_attempt)
-    
-    def _log_attempt(self, success: bool, confidence: float, threshold: float, pin_unlock: bool):
-        """Log authentication attempt."""
-        try:
-            log_file = self.data_dir / "auth_log.txt"
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            status = "OK" if success else "FAIL"
-            unlock = "PIN" if pin_unlock else "PASS"
-            
-            with open(log_file, 'a') as f:
-                f.write(f"{timestamp} | {status} | {unlock} | {confidence:.1f}% | min:{threshold:.0f}%\n")
-        except Exception:
-            pass
-    
-    def get_auth_history(self, limit: int = 10) -> list:
-        """Get auth history."""
-        log_file = self.data_dir / "auth_log.txt"
-        if log_file.exists():
-            try:
-                with open(log_file, 'r') as f:
-                    lines = f.readlines()
-                return lines[-limit:] if len(lines) > limit else lines
-            except Exception:
-                pass
-        return []
-    
-    def reset_face_data(self) -> bool:
-        """Reset face data."""
-        try:
-            if self.encodings_file.exists():
-                self.encodings_file.unlink()
-            self.known_face_encodings = []
-            
-            for img in self.data_dir.glob("registration_*.jpg"):
-                try:
-                    img.unlink()
-                except Exception:
-                    pass
-            return True
-        except Exception:
+            error_text = str(e)
+            self.parent.after(0, self._show_enroll_error, error_text)
+
+    def _show_enroll_success(self):
+        messagebox.showinfo("Success", "Face enrolled successfully!", parent=self.parent)
+
+    def _show_enroll_error(self, error_text):
+        messagebox.showerror("Enrollment Failed", error_text, parent=self.parent)
+
+    def run_authentication(self, silent: bool = False) -> bool:
+        """Run face authentication with UI feedback.
+        If silent=True, skip the info messagebox (used for auto-start).
+        """
+        if not is_face_registered():
+            if not silent:
+                msg = messagebox.askyesno(
+                    "No Face Registered",
+                    "No face data found. Would you like to enroll now?",
+                    parent=self.parent,
+                )
+                if msg:
+                    return self.run_enrollment()
             return False
-    
-    def reset_all_data(self) -> bool:
-        """Reset all authentication data."""
+
+        threading.Thread(target=self._auth_thread, daemon=True).start()
+        if not silent:
+            messagebox.showinfo(
+                "Face Authentication",
+                "Webcam will open. Look at the camera to authenticate.\n"
+                "Press 'q' to cancel.",
+                parent=self.parent,
+            )
+        return True
+
+    def _auth_thread(self):
         try:
-            self.reset_face_data()
-            self.disable_quick_pin()
-            if self.settings_file.exists():
-                self.settings_file.unlink()
-            log_file = self.data_dir / "auth_log.txt"
-            if log_file.exists():
-                log_file.unlink()
-            return True
-        except Exception:
-            return False
-    
-    def get_status(self) -> dict:
-        """Get current status."""
-        return {
-            'face_registered': self.is_registered(),
-            'face_samples': self.get_registration_count(),
-            'pin_enabled': self.pin_enabled,
-            'liveness_enabled': self.liveness_enabled,
-            'liveness_verified': self.liveness_verified,
-            'blinks_done': self.blink_counter,
-            'blinks_required': self.blinks_required,
-            'security_level': self.get_security_level(),
-            'security_name': self.get_security_level_name(),
-            'face_only_threshold': self.face_only_threshold * 100
-        }
-    
-    def __del__(self):
-        """Cleanup."""
-        try:
-            if hasattr(self, 'temp_image_path') and os.path.exists(self.temp_image_path):
-                os.remove(self.temp_image_path)
-        except Exception:
-            pass
+            result = authenticate_face()
+            self.result = result
+            self.auth_completed = True
+            self.parent.after(0, self._on_auth_done, result)
+        except Exception as e:
+            self.result = 'failed'
+            self.auth_completed = True
+            error_text = str(e)
+            self.parent.after(0, self._show_auth_error, error_text)
+
+    def _on_auth_done(self, result: str):
+        pass  # GUI polling loop handles all user feedback
+
+    def _show_auth_error(self, error_text):
+        messagebox.showerror("Error", error_text, parent=self.parent)
+

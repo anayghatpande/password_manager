@@ -7,7 +7,7 @@ Write-Host "Current Directory: $(Get-Location)"
 # Run PyInstaller
 pyinstaller --onefile --windowed `
   --distpath "exported_app" `
-  --add-data "master.hash;." `
   --add-data "vault_core.py;." `
   --add-data "password_generator.py;." `
+  --add-data "face_auth.py;." `
   gui_app.py

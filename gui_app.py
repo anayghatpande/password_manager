@@ -1,1212 +1,755 @@
 """
-Anay's Password Vault - GUI Application
-With Face Recognition Authentication
+Anay's Password Vault — Optimized GUI
+Modern UI with face recognition, keyboard shortcuts, edit capabilities, inline password generation,
+and a polished user experience.
 """
 
-import tkinter as tk
-from tkinter import simpledialog, messagebox, ttk
-import pyperclip
-import cv2
-from PIL import Image, ImageTk
-import numpy as np
-import tempfile
 import os
-
-# Import vault modules
-from vault_core import derive_key, load_vault, save_vault, verify_master_password
+import tkinter as tk
+from tkinter import simpledialog, messagebox, ttk, filedialog
+import pyperclip
+import time
+import re
+import csv
+import sys
+import logging
+from vault_core import derive_key, load_vault, save_vault, verify_master_password, save_master_password, MASTER_HASH_FILE, generate_recovery_codes, verify_recovery_code, has_recovery_codes
 from password_generator import generate_password
+from face_auth import FaceAuthDialog, is_face_registered, save_vault_key_for_face, get_vault_key_from_face
 
-# Import face_recognition with error handling
-try:
-    import face_recognition
-    FACE_RECOGNITION_AVAILABLE = True
-except ImportError:
-    FACE_RECOGNITION_AVAILABLE = False
-    print("[WARNING] face_recognition not available")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("PasswordVault")
 
-# Import face_auth
-try:
-    from face_auth import FaceAuthenticator
-except ImportError:
-    FACE_RECOGNITION_AVAILABLE = False
-    
-    class FaceAuthenticator:
-        """Dummy class when face_auth is not available."""
-        def __init__(self, *args, **kwargs):
-            pass
-        def is_registered(self):
-            return False
-        def reset_attempts(self):
-            pass
-        def is_locked_out(self):
-            return False
-        def get_registration_count(self):
-            return 0
-        def reset_face_data(self):
-            return True
-        def register_face_from_frame(self, frame):
-            return False, "Face auth not available"
-        def verify_face_from_frame(self, frame):
-            return False, 0, "Face auth not available"
-        def get_face_confidence(self, frame):
-            return False, 0, "Not available"
-        def get_security_level(self):
-            return 0.6
-        def set_security_level(self, level):
-            return True
-        def get_security_level_name(self):
-            return "Medium"
-        def get_auth_history(self, limit=10):
-            return []
+# --- Constants ---
+APP_NAME = "Anay's Password Vault"
+PRIMARY = "#4CAF50"
+PRIMARY_DARK = "#388E3C"
+SECONDARY = "#FF5722"
+BG_LIGHT = "#F5F5F5"
+BG_WHITE = "#FFFFFF"
+HEADER_TEAL = "#3C9D9B"
+DANGER = "#F44336"
+WARNING = "#FF9800"
+TEXT_DARK = "#212121"
+TEXT_GREY = "#757575"
+BORDER = "#E0E0E0"
+CLIPBOARD_CLEAR_SECONDS = 10
+AUTO_LOCK_MINUTES = 5
+FACE_POLL_TIMEOUT = 60
 
 
 class PasswordManagerGUI:
-    """Main GUI Application for Password Manager."""
-    
     def __init__(self, root):
         self.root = root
-        self.root.title("🔐 Anay's Password Vault")
+        self.root.title(APP_NAME)
+        self.root.configure(bg=BG_LIGHT)
+        self.root.minsize(800, 500)
+        self.root.geometry("950x600")
+
         self.vault = {}
         self.key = None
+        self.master_pw = None
         self.revealed_rows = {}
+        self.sort_column = None
+        self.sort_reverse = False
 
-        # Face authentication
-        self.face_auth = FaceAuthenticator()
-        self.camera_running = False
-        self.cap = None
-        self.current_frame = None
-        self.registration_mode = False
-        self.samples_needed = 5
-        
-        # Temp file for reliable face detection
-        self.temp_dir = tempfile.gettempdir()
-        self.temp_image_path = os.path.join(self.temp_dir, "face_auth_temp.jpg")
+        self.clipboard_timer = None
+        self.last_activity_time = time.time()
+        self.auto_lock_timer = None
 
-        # Styling
-        self.font = ("Helvetica", 14)
-        self.primary_color = "#4CAF50"
-        self.bg_color = "#f4f4f9"
-        self.button_color = "#FF5722"
-        self.header_color = "#3C9D9B"
-        self.face_auth_color = "#2196F3"
-
-        self.root.configure(bg=self.bg_color)
-        
-        # Bind cleanup on window close
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Start the appropriate screen
-        if FACE_RECOGNITION_AVAILABLE and self.face_auth.is_registered():
-            self.face_login_screen()
-        elif FACE_RECOGNITION_AVAILABLE:
-            self.face_setup_screen()
+        if sys.platform == "win32":
+            self.font_title = ("Segoe UI", 18, "bold")
+            self.font_subtitle = ("Segoe UI", 12)
+            self.font_normal = ("Segoe UI", 11)
+            self.font_small = ("Segoe UI", 9)
+            self.font_button = ("Segoe UI", 11, "bold")
+        elif sys.platform == "darwin":
+            self.font_title = ("Helvetica Neue", 18, "bold")
+            self.font_subtitle = ("Helvetica Neue", 12)
+            self.font_normal = ("Helvetica Neue", 11)
+            self.font_small = ("Helvetica Neue", 9)
+            self.font_button = ("Helvetica Neue", 11, "bold")
         else:
-            self.login_screen()
+            self.font_title = ("Ubuntu", 18, "bold")
+            self.font_subtitle = ("Ubuntu", 12)
+            self.font_normal = ("Ubuntu", 11)
+            self.font_small = ("Ubuntu", 9)
+            self.font_button = ("Ubuntu", 11, "bold")
 
-    # ==================== UTILITY METHODS ====================
-    
-    def on_closing(self):
-        """Handle window close event."""
-        self.stop_camera()
-        try:
-            if os.path.exists(self.temp_image_path):
-                os.remove(self.temp_image_path)
-        except Exception:
-            pass
-        self.root.destroy()
+        self._configure_styles()
+        self.login_screen()
+        self._start_auto_lock_check()
 
-    def clear_screen(self):
-        """Clear all widgets from the screen."""
-        self.stop_camera()
+    def _clear_screen(self):
         for widget in self.root.winfo_children():
             widget.destroy()
 
-    def detect_faces_reliable(self, frame):
-        """
-        Reliable face detection using save-and-reload method.
-        """
-        if not FACE_RECOGNITION_AVAILABLE:
-            return []
-        
-        try:
-            cv2.imwrite(self.temp_image_path, frame)
-            image = face_recognition.load_image_file(self.temp_image_path)
-            face_locations = face_recognition.face_locations(image, model="hog")
-            return face_locations
-        except Exception as e:
-            print(f"Face detection error: {e}")
-            return []
-
-    def encode_face_reliable(self, frame):
-        """
-        Reliable face encoding using save-and-reload method.
-        """
-        if not FACE_RECOGNITION_AVAILABLE:
-            return None, None, "face_recognition not available"
-        
-        try:
-            cv2.imwrite(self.temp_image_path, frame)
-            image = face_recognition.load_image_file(self.temp_image_path)
-            face_locations = face_recognition.face_locations(image, model="hog")
-            
-            if len(face_locations) == 0:
-                return None, None, "No face detected"
-            
-            if len(face_locations) > 1:
-                return None, None, "Multiple faces detected"
-            
-            face_encodings = face_recognition.face_encodings(image, face_locations)
-            
-            if len(face_encodings) == 0:
-                return None, None, "Could not encode face"
-            
-            return face_encodings[0], face_locations[0], None
-            
-        except Exception as e:
-            return None, None, f"Error: {str(e)}"
-
-    # ==================== CAMERA METHODS ====================
-
-    def start_camera(self):
-        """Start the camera feed."""
-        self.current_frame = None
-        self.camera_running = True
-        
-        self.cap = None
-        
-        # Try DirectShow first (Windows)
-        for index in [0, 1]:
-            try:
-                cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-                if cap.isOpened():
-                    ret, test_frame = cap.read()
-                    if ret and test_frame is not None:
-                        self.cap = cap
-                        print(f"Camera opened with DirectShow, index {index}")
-                        break
-                cap.release()
-            except Exception as e:
-                print(f"DirectShow camera {index} error: {e}")
-        
-        # Try without DirectShow
-        if self.cap is None:
-            for index in [0, 1]:
-                try:
-                    cap = cv2.VideoCapture(index)
-                    if cap.isOpened():
-                        ret, test_frame = cap.read()
-                        if ret and test_frame is not None:
-                            self.cap = cap
-                            print(f"Camera opened without DirectShow, index {index}")
-                            break
-                    cap.release()
-                except Exception as e:
-                    print(f"Camera {index} error: {e}")
-        
-        if self.cap is None:
-            self.status_label.config(text="❌ Could not access camera!", fg="red")
-            return
-        
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
-        self.status_label.config(text="📷 Camera ready - Position your face", fg="green")
-        self.update_camera()
-
-    def update_camera(self):
-        """Update camera feed with liveness and confidence display."""
-        if not self.camera_running or self.cap is None:
-            return
-
-        try:
-            ret, frame = self.cap.read()
-            
-            if ret and frame is not None:
-                self.current_frame = frame.copy()
-                display_frame = frame.copy()
-                
-                # Detect faces
-                face_locations = self.detect_faces_reliable(frame)
-                
-                # Check liveness
-                liveness_msg = ""
-                if self.face_auth.liveness_enabled and not self.registration_mode:
-                    is_live, blinks, liveness_msg = self.face_auth.check_liveness_frame(frame)
-                
-                # Draw rectangles
-                for (top, right, bottom, left) in face_locations:
-                    # Get confidence
-                    if self.face_auth.is_registered() and not self.registration_mode:
-                        has_face, confidence, _ = self.face_auth.get_face_confidence(frame)
-                        threshold = self.face_auth.get_security_level() * 100
-                        face_only_threshold = self.face_auth.face_only_threshold * 100
-                        
-                        if has_face:
-                            if confidence >= face_only_threshold:
-                                color = (0, 255, 0)  # Green - PIN unlock available
-                                status = f"{confidence:.0f}% (PIN OK)"
-                            elif confidence >= threshold:
-                                color = (0, 200, 255)  # Yellow-ish
-                                status = f"{confidence:.0f}%"
-                            else:
-                                color = (0, 165, 255)  # Orange
-                                status = f"{confidence:.0f}% LOW"
-                        else:
-                            color = (0, 0, 255)
-                            status = "NO MATCH"
-                    else:
-                        color = (0, 255, 0)
-                        status = "Detected"
-                    
-                    cv2.rectangle(display_frame, (left, top), (right, bottom), color, 2)
-                    cv2.putText(display_frame, status, (left, top - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                
-                # Update status label
-                if len(face_locations) == 0:
-                    self.status_label.config(text="👤 No face - Move closer", fg="orange")
-                elif len(face_locations) > 1:
-                    self.status_label.config(text="⚠️ Multiple faces", fg="orange")
-                else:
-                    if self.registration_mode:
-                        self.status_label.config(text="✅ Face detected - Click Capture", fg="green")
-                    else:
-                        # Show liveness status
-                        if self.face_auth.liveness_enabled:
-                            if self.face_auth.is_liveness_verified():
-                                self.status_label.config(text="✅ Liveness OK - Click Verify", fg="green")
-                            else:
-                                blinks = self.face_auth.blink_counter
-                                needed = self.face_auth.blinks_required
-                                self.status_label.config(
-                                    text=f"👁️ Blink to verify ({blinks}/{needed})",
-                                    fg="blue"
-                                )
-                        else:
-                            self.status_label.config(text="✅ Ready - Click Verify", fg="green")
-                
-                # Convert for display
-                display_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-                display_resized = cv2.resize(display_rgb, (480, 360))
-                
-                img = Image.fromarray(display_resized)
-                imgtk = ImageTk.PhotoImage(image=img)
-                
-                self.camera_frame.imgtk = imgtk
-                self.camera_frame.configure(image=imgtk)
-            
-        except Exception as e:
-            print(f"Camera error: {e}")
-        
-        if self.camera_running:
-            self.root.after(100, self.update_camera)
-
-    def stop_camera(self):
-        """Stop the camera feed."""
-        self.camera_running = False
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
-        self.current_frame = None
-
-    # ==================== FACE SETUP SCREEN ====================
-
-    def face_setup_screen(self):
-        """First-time face registration screen."""
-        self.clear_screen()
-        self.registration_mode = True
-
-        frame = tk.Frame(self.root, bg=self.bg_color)
-        frame.pack(pady=20, padx=20, fill="both", expand=True)
-
-        # Header
-        tk.Label(
-            frame, 
-            text="🔐 Welcome to Anay's Password Vault", 
-            font=("Helvetica", 20, "bold"), 
-            fg=self.header_color, 
-            bg=self.bg_color
-        ).pack(pady=10)
-
-        # Subtitle
-        tk.Label(
-            frame, 
-            text="📸 First-time Setup: Register Your Face", 
-            font=("Helvetica", 14), 
-            fg=self.face_auth_color, 
-            bg=self.bg_color
-        ).pack(pady=5)
-
-        # Instructions
-        tk.Label(
-            frame, 
-            text=f"We'll capture {self.samples_needed} photos of your face for secure authentication.\n"
-                 "Position your face in the camera and click 'Capture' for each sample.",
-            font=("Helvetica", 11), 
-            bg=self.bg_color,
-            justify="center"
-        ).pack(pady=10)
-
-        # Progress label
-        self.progress_label = tk.Label(
-            frame, 
-            text=f"Samples captured: 0/{self.samples_needed}", 
-            font=("Helvetica", 12, "bold"), 
-            fg=self.primary_color, 
-            bg=self.bg_color
-        )
-        self.progress_label.pack(pady=5)
-
-        # Camera frame
-        self.camera_frame = tk.Label(frame, bg="black", width=640, height=480)
-        self.camera_frame.pack(pady=10)
-
-        # Status label
-        self.status_label = tk.Label(
-            frame, 
-            text="📷 Camera starting...", 
-            font=("Helvetica", 11), 
-            fg="#666", 
-            bg=self.bg_color
-        )
-        self.status_label.pack(pady=5)
-
-        # Buttons
-        btn_frame = tk.Frame(frame, bg=self.bg_color)
-        btn_frame.pack(pady=10)
-
-        self.capture_btn = tk.Button(
-            btn_frame, 
-            text="📸 Capture Sample", 
-            command=self.capture_registration_sample,
-            bg=self.face_auth_color, 
-            fg="white", 
-            font=("Helvetica", 12, "bold"),
-            relief="raised",
-            width=20
-        )
-        self.capture_btn.grid(row=0, column=0, padx=10)
-
-        tk.Button(
-            btn_frame, 
-            text="⏭️ Skip (Password Only)", 
-            command=self.skip_face_setup,
-            bg="#9E9E9E", 
-            fg="white", 
-            font=("Helvetica", 12),
-            relief="raised",
-            width=20
-        ).grid(row=0, column=1, padx=10)
-
-        self.start_camera()
-
-    def capture_registration_sample(self):
-        """Capture a face sample for registration."""
-        if self.current_frame is None:
-            self.status_label.config(text="❌ No frame available", fg="red")
-            return
-
-        success, message = self.face_auth.register_face_from_frame(self.current_frame)
-        
-        if success:
-            count = self.face_auth.get_registration_count()
-            self.progress_label.config(text=f"Samples captured: {count}/{self.samples_needed}")
-            self.status_label.config(text=f"✅ {message}", fg="green")
-            
-            if count >= self.samples_needed:
-                self.stop_camera()
-                messagebox.showinfo(
-                    "Registration Complete", 
-                    "✅ Face registration successful!\n\n"
-                    "You can now use face authentication to access your vault."
-                )
-                self.login_screen()
+    def _update_status(self):
+        count = len(self.vault)
+        self.badge_entries.config(text=f"{count} entries")
+        if count > 0:
+            hidden = sum(1 for v in self.revealed_rows.values() if v)
+            self.count_label.config(text=f"Showing {count} services ({hidden} passwords visible)")
         else:
-            self.status_label.config(text=f"❌ {message}", fg="red")
+            self.count_label.config(text="No entries yet. Add your first password!")
 
-    def skip_face_setup(self):
-        """Skip face setup and go to password-only login."""
-        if messagebox.askyesno(
-            "Skip Face Setup?",
-            "Are you sure you want to skip face authentication setup?\n\n"
-            "You can set it up later from the main menu."
-        ):
-            self.stop_camera()
-            self.login_screen()
+    def _update_activity(self):
+        self.last_activity_time = time.time()
 
-    # ==================== FACE LOGIN SCREEN ====================
+    def _start_auto_lock_check(self):
+        def _check():
+            if self.key is not None and self.master_pw is not None:
+                elapsed = time.time() - self.last_activity_time
+                remaining = AUTO_LOCK_MINUTES * 60 - elapsed
+                if remaining <= 0:
+                    self._lock_vault(auto=True)
+                    return
+                if remaining < 45 and remaining > 35:
+                    self.status_text.set(f"⚠️ Auto-lock in {int(remaining)} seconds — move mouse or type to stay active")
+                elif remaining < 35:
+                    self.status_text.set(f"⚠️⚠️ Locking in {int(remaining)}s...")
+            self.auto_lock_timer = self.root.after(5000, _check)
+        self.auto_lock_timer = self.root.after(30000, _check)
 
-    def face_login_screen(self):
-        """Face authentication login screen."""
-        self.clear_screen()
-        self.registration_mode = False
-        self.face_auth.reset_attempts()
+    def _configure_styles(self):
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("Treeview", background=BG_WHITE, foreground=TEXT_DARK, rowheight=34, fieldbackground=BG_WHITE, font=self.font_normal, borderwidth=0)
+        style.map("Treeview", background=[("selected", "#E3F2FD")], foreground=[("selected", TEXT_DARK)])
+        style.configure("Treeview.Heading", background=HEADER_TEAL, foreground=BG_WHITE, font=(self.font_normal[0], 11, "bold"), borderwidth=0, relief="flat")
+        style.map("Treeview.Heading", background=[("active", "#2E7D7B")])
+        style.configure("TScrollbar", background=BORDER, troughcolor=BG_LIGHT, bordercolor=BORDER, arrowcolor=TEXT_GREY)
 
-        frame = tk.Frame(self.root, bg=self.bg_color)
-        frame.pack(pady=20, padx=20, fill="both", expand=True)
-
-        # Header
-        tk.Label(
-            frame, 
-            text="🔐 Anay's Password Vault", 
-            font=("Helvetica", 20, "bold"), 
-            fg=self.header_color, 
-            bg=self.bg_color
-        ).pack(pady=10)
-
-        # Subtitle with security level
-        security_level = self.face_auth.get_security_level() * 100
-        tk.Label(
-            frame, 
-            text=f"📸 Face Authentication (Security: {security_level:.0f}%)", 
-            font=("Helvetica", 14), 
-            fg=self.face_auth_color, 
-            bg=self.bg_color
-        ).pack(pady=5)
-
-        # Instructions
-        tk.Label(
-            frame, 
-            text="Position your face in the camera and click 'Verify' to authenticate.",
-            font=("Helvetica", 11), 
-            bg=self.bg_color
-        ).pack(pady=10)
-
-        # Camera frame
-        self.camera_frame = tk.Label(frame, bg="black", width=640, height=480)
-        self.camera_frame.pack(pady=10)
-
-        # Status label
-        self.status_label = tk.Label(
-            frame, 
-            text="📷 Camera starting...", 
-            font=("Helvetica", 11), 
-            fg="#666", 
-            bg=self.bg_color
-        )
-        self.status_label.pack(pady=5)
-
-        # Confidence display
-        self.confidence_label = tk.Label(
-            frame, 
-            text="", 
-            font=("Helvetica", 12, "bold"), 
-            bg=self.bg_color
-        )
-        self.confidence_label.pack(pady=5)
-
-        # Buttons
-        btn_frame = tk.Frame(frame, bg=self.bg_color)
-        btn_frame.pack(pady=10)
-
-        tk.Button(
-            btn_frame, 
-            text="🔓 Verify Face", 
-            command=self.verify_face,
-            bg=self.primary_color, 
-            fg="white", 
-            font=("Helvetica", 12, "bold"),
-            relief="raised",
-            width=15
-        ).grid(row=0, column=0, padx=10)
-
-        tk.Button(
-            btn_frame, 
-            text="🔑 Use Password", 
-            command=self.switch_to_password_login,
-            bg=self.button_color, 
-            fg="white", 
-            font=("Helvetica", 12),
-            relief="raised",
-            width=15
-        ).grid(row=0, column=1, padx=10)
-
-        self.start_camera()
-
-    def verify_face(self):
-        """Verify face with PIN unlock support."""
-        if self.face_auth.is_locked_out():
-            self.stop_camera()
-            messagebox.showerror("Locked Out", "❌ Too many failed attempts!")
-            self.switch_to_password_login()
-            return
-
-        if self.current_frame is None:
-            self.status_label.config(text="❌ No frame available", fg="red")
-            return
-
-        # Verify face
-        success, confidence, message, can_use_pin = self.face_auth.verify_face_from_frame(self.current_frame)
-        
-        if success:
-            self.stop_camera()
-            self.confidence_label.config(text=f"✅ Match: {confidence:.1f}%", fg="green")
-            self.status_label.config(text="✅ Face verified!", fg="green")
-            self.root.update()
-            
-            if can_use_pin:
-                # Show PIN entry (faster than password)
-                self.root.after(500, self.show_pin_entry)
-            else:
-                # Need full password
-                self.root.after(500, self.password_verification_after_face)
-        else:
-            self.status_label.config(text=f"❌ {message}", fg="red")
-            self.confidence_label.config(
-                text=f"Confidence: {confidence:.1f}%",
-                fg="red" if confidence < 50 else "orange"
-            )
-            
-            if self.face_auth.is_locked_out():
-                self.stop_camera()
-                messagebox.showerror("Locked Out", "❌ Maximum attempts reached!")
-                self.switch_to_password_login()
-
-
-    def password_verification_after_face(self):
-        """Show password verification after successful face auth."""
-        self.clear_screen()
-
-        frame = tk.Frame(self.root, bg=self.bg_color)
-        frame.pack(pady=100, padx=20, fill="both", expand=True)
-
-        tk.Label(
-            frame, 
-            text="✅ Face Verified!", 
-            font=("Helvetica", 16, "bold"), 
-            fg="green", 
-            bg=self.bg_color
-        ).pack(pady=10)
-
-        tk.Label(
-            frame, 
-            text="🔑 Enter Master Password", 
-            font=("Helvetica", 18, "bold"), 
-            fg=self.header_color, 
-            bg=self.bg_color
-        ).pack(pady=20)
-
-        tk.Label(
-            frame, 
-            text="Enter your master password to decrypt the vault",
-            font=("Helvetica", 12), 
-            bg=self.bg_color
-        ).pack(pady=10)
-
-        self.master_password_var = tk.StringVar()
-        pw_entry = tk.Entry(
-            frame, 
-            textvariable=self.master_password_var, 
-            show="*", 
-            font=self.font, 
-            width=25, 
-            bd=2, 
-            relief="solid"
-        )
-        pw_entry.pack(pady=10)
-        pw_entry.focus()
-        pw_entry.bind("<Return>", lambda e: self.verify_master_password())
-
-        tk.Button(
-            frame, 
-            text="🔓 Unlock Vault", 
-            command=self.verify_master_password, 
-            bg=self.primary_color, 
-            fg="white", 
-            font=("Helvetica", 12, "bold"), 
-            relief="raised", 
-            width=20
-        ).pack(pady=20)
-
-    def show_pin_entry(self):
-        """Show PIN entry screen after face verification."""
-        self.clear_screen()
-
-        frame = tk.Frame(self.root, bg=self.bg_color)
-        frame.pack(pady=80, padx=20, fill="both", expand=True)
-
-        # Success header
-        tk.Label(
-            frame,
-            text="✅ Face Verified!",
-            font=("Helvetica", 18, "bold"),
-            fg="green",
-            bg=self.bg_color
-        ).pack(pady=15)
-
-        tk.Label(
-            frame,
-            text="🔓 Enter Quick PIN to Unlock",
-            font=("Helvetica", 16),
-            fg=self.header_color,
-            bg=self.bg_color
-        ).pack(pady=10)
-
-        # PIN Entry
-        self.pin_var = tk.StringVar()
-        pin_frame = tk.Frame(frame, bg=self.bg_color)
-        pin_frame.pack(pady=20)
-        
-        pin_entry = tk.Entry(
-            pin_frame,
-            textvariable=self.pin_var,
-            show="●",
-            font=("Helvetica", 24),
-            width=8,
-            justify="center",
-            bd=2,
-            relief="solid"
-        )
-        pin_entry.pack()
-        pin_entry.focus()
-        pin_entry.bind("<Return>", lambda e: self.verify_pin_and_unlock())
-        
-        # Buttons
-        btn_frame = tk.Frame(frame, bg=self.bg_color)
-        btn_frame.pack(pady=20)
-
-        tk.Button(
-            btn_frame,
-            text="🔓 Unlock",
-            command=self.verify_pin_and_unlock,
-            bg=self.primary_color,
-            fg="white",
-            font=("Helvetica", 12, "bold"),
-            width=15
-        ).grid(row=0, column=0, padx=10)
-
-        tk.Button(
-            btn_frame,
-            text="🔑 Use Password",
-            command=self.password_verification_after_face,
-            bg=self.button_color,
-            fg="white",
-            font=("Helvetica", 12),
-            width=15
-        ).grid(row=0, column=1, padx=10)
-
-        # Info
-        tk.Label(
-            frame,
-            text="Or use your master password instead",
-            font=("Helvetica", 10),
-            fg="#666",
-            bg=self.bg_color
-        ).pack(pady=10)
-
-
-    def verify_pin_and_unlock(self):
-        """Verify PIN and unlock vault."""
-        pin = self.pin_var.get()
-        
-        if not pin:
-            messagebox.showerror("Error", "Please enter your PIN")
-            return
-        
-        success, message = self.face_auth.verify_pin(pin)
-        
-        if success:
-            # PIN verified - now need password for vault decryption
-            # But we can show a simpler password prompt
-            self.show_simple_password_prompt()
-        else:
-            messagebox.showerror("Error", f"❌ {message}")
-
-
-    def show_simple_password_prompt(self):
-        """Show simplified password prompt after PIN verification."""
-        self.clear_screen()
-
-        frame = tk.Frame(self.root, bg=self.bg_color)
-        frame.pack(pady=100, padx=20, fill="both", expand=True)
-
-        tk.Label(
-            frame,
-            text="✅ Face + PIN Verified!",
-            font=("Helvetica", 16, "bold"),
-            fg="green",
-            bg=self.bg_color
-        ).pack(pady=10)
-
-        tk.Label(
-            frame,
-            text="🔑 Enter Master Password",
-            font=("Helvetica", 14),
-            fg=self.header_color,
-            bg=self.bg_color
-        ).pack(pady=15)
-
-        self.master_password_var = tk.StringVar()
-        pw_entry = tk.Entry(
-            frame,
-            textvariable=self.master_password_var,
-            show="*",
-            font=self.font,
-            width=25,
-            bd=2,
-            relief="solid"
-        )
-        pw_entry.pack(pady=10)
-        pw_entry.focus()
-        pw_entry.bind("<Return>", lambda e: self.verify_master_password())
-
-        tk.Button(
-            frame,
-            text="🔓 Unlock Vault",
-            command=self.verify_master_password,
-            bg=self.primary_color,
-            fg="white",
-            font=("Helvetica", 12, "bold"),
-            width=20
-        ).pack(pady=20)
-
-
-    def switch_to_password_login(self):
-        """Switch to password-only login."""
-        self.stop_camera()
-        self.login_screen()
-
-    # ==================== PASSWORD LOGIN SCREEN ====================
+    # ====== LOGIN SCREEN ======
 
     def login_screen(self):
-        """Original password login screen."""
-        self.clear_screen()
+        """Display the login screen with master password and face auth options."""
+        self._clear_screen()
+        self.face_status_label = None
+        container = tk.Frame(self.root, bg=BG_LIGHT)
+        container.place(relx=0.5, rely=0.5, anchor="center")
 
-        frame = tk.Frame(self.root, bg=self.bg_color)
-        frame.pack(pady=100, padx=20, fill="both", expand=True)
+        # Icon
+        tk.Label(container, text="🔐", font=(self.font_normal[0], 48),
+                 bg=BG_LIGHT).pack(pady=(0, 5))
+        tk.Label(container, text="Welcome to Anay's Password Vault",
+                 font=self.font_title, fg=HEADER_TEAL,
+                 bg=BG_LIGHT).pack(pady=5)
+        tk.Label(container, text="Enter your master password or use face recognition",
+                 font=self.font_subtitle, fg=TEXT_GREY,
+                 bg=BG_LIGHT).pack(pady=(0, 20))
 
-        tk.Label(
-            frame, 
-            text="🔐 Welcome to Anay's Password Vault", 
-            font=("Helvetica", 18, "bold"), 
-            fg=self.header_color, 
-            bg=self.bg_color
-        ).pack(pady=20)
-
-        tk.Label(
-            frame, 
-            text="Enter your master password to proceed", 
-            font=("Helvetica", 12), 
-            bg=self.bg_color
-        ).pack(pady=10)
+        # Password field
+        pw_frame = tk.Frame(container, bg=BG_WHITE,
+                            highlightbackground=BORDER,
+                            highlightthickness=1, bd=0)
+        pw_frame.pack(pady=5, ipadx=5, ipady=5)
+        tk.Label(pw_frame, text="🔑  ", font=(self.font_normal[0], 14),
+                 bg=BG_WHITE).pack(side=tk.LEFT, padx=(10, 0))
 
         self.master_password_var = tk.StringVar()
-        pw_entry = tk.Entry(
-            frame, 
-            textvariable=self.master_password_var, 
-            show="*", 
-            font=self.font, 
-            width=25, 
-            bd=2, 
-            relief="solid"
+        self.pw_entry = tk.Entry(pw_frame,
+                                  textvariable=self.master_password_var,
+                                  show="*", font=self.font_normal,
+                                  width=28, bd=0, highlightthickness=0)
+        self.pw_entry.pack(side=tk.LEFT, padx=(0, 10), pady=8)
+        self.pw_entry.bind("<Return>", lambda e: self.verify_master_password())
+        self.pw_entry.focus_set()
+
+        # Submit
+        tk.Button(container, text="   Unlock Vault   ",
+                   command=self.verify_master_password,
+                   bg=PRIMARY, fg=BG_WHITE, font=self.font_button,
+                   bd=0, padx=20, pady=8, cursor="hand2",
+                   activebackground=PRIMARY_DARK).pack(pady=(15, 5))
+
+        # Separator
+        sep = tk.Frame(container, bg=BG_LIGHT)
+        sep.pack(fill="x", pady=10)
+        tk.Frame(sep, bg=BORDER, height=1).pack(fill="x",
+                  side=tk.LEFT, expand=True)
+        tk.Label(sep, text="  OR  ", bg=BG_LIGHT, fg=TEXT_GREY,
+                 font=self.font_small).pack(side=tk.LEFT)
+        tk.Frame(sep, bg=BORDER, height=1).pack(fill="x",
+                  side=tk.LEFT, expand=True)
+
+        # Face button
+        face_icon = "📸" if is_face_registered() else "➕"
+        face_text = "  Face Login  " if is_face_registered() else "  Enroll Face  "
+        tk.Button(container, text=f"{face_icon}{face_text}",
+                   command=self._handle_face_auth,
+                   bg=HEADER_TEAL, fg=BG_WHITE, font=self.font_button,
+                   bd=0, padx=20, pady=8, cursor="hand2",
+                   activebackground="#2E7D7B").pack(pady=5)
+
+        # Face status label (for auto-start feedback)
+        self.face_status_label = tk.Label(container, text="",
+                                           font=self.font_small, fg=HEADER_TEAL,
+                                           bg=BG_LIGHT)
+        self.face_status_label.pack(pady=(2, 0))
+
+        tk.Label(container, text="v3.1 — Offline & Secure",
+                 font=self.font_small, fg=TEXT_GREY,
+                 bg=BG_LIGHT).pack(pady=(20, 0))
+
+        self.root.title(f"🔒 {APP_NAME}")
+
+        # Auto-start face authentication if face is registered
+        if is_face_registered():
+            self.face_status_label.config(text="📸 Face authentication starting...")
+            self.root.after(1500, lambda: self._handle_face_auth(auto=True))
+
+    def _handle_face_auth(self, auto=False):
+        face_dialog = FaceAuthDialog(self.root)
+        if is_face_registered():
+            if self.face_status_label:
+                self.face_status_label.config(
+                    text="📸 Looking for your face in camera..."
+                )
+            face_dialog.run_authentication(silent=auto)
+            poll_start = time.time()
+
+            def _check_auth():
+                elapsed = time.time() - poll_start
+
+                if not face_dialog.auth_completed:
+                    if elapsed > FACE_POLL_TIMEOUT:
+                        if self.face_status_label:
+                            self.face_status_label.config(text="")
+                        return
+                    self.root.after(500, _check_auth)
+                    return
+
+                result = face_dialog.result
+
+                if result == 'full':
+                    if self.face_status_label:
+                        self.face_status_label.config(text="✅ Face matched! Unlocking...")
+                    vault_key = get_vault_key_from_face()
+                    if vault_key:
+                        try:
+                            self.key = vault_key
+                            self.vault = load_vault(self.key)
+                            self.main_screen()
+                            return
+                        except Exception as e:
+                            logger.error(f"Face unlock vault load failed: {e}")
+                            result = 'partial'
+                    else:
+                        result = 'partial'
+
+                if result == 'partial':
+                    if self.face_status_label:
+                        self.face_status_label.config(text="✅ Face matched! Enter master password.")
+                    pw = simpledialog.askstring(
+                        "Face Recognized",
+                        "Face verified! Enter your master password to unlock:",
+                        show="*", parent=self.root
+                    )
+                    if pw and verify_master_password(pw):
+                        self.master_password_var.set(pw)
+                        self.verify_master_password()
+                    elif pw is not None:
+                        self._show_fallback_or_recovery()
+
+                elif result == 'failed':
+                    if self.face_status_label:
+                        self.face_status_label.config(
+                            text="❌ Face not recognized. Use password or recovery code."
+                        )
+                    self._show_fallback_or_recovery()
+
+            self.root.after(1000, _check_auth)
+        else:
+            if not auto:
+                face_dialog.run_enrollment()
+
+    def _show_fallback_or_recovery(self):
+        """Show fallback options after failed face auth."""
+        answer = messagebox.askquestion(
+            "Access Denied",
+            "Face not recognized.\n\n"
+            "• Enter your master password below\n"
+            "• Use a recovery code if you forgot your password\n\n"
+            "Try master password?",
+            icon="warning", parent=self.root
         )
-        pw_entry.pack(pady=10)
-        pw_entry.focus()
-        pw_entry.bind("<Return>", lambda e: self.verify_master_password())
+        if answer == "yes":
+            self.pw_entry.focus_set()
+        else:
+            self._recovery_code_dialog()
 
-        btn_frame = tk.Frame(frame, bg=self.bg_color)
-        btn_frame.pack(pady=20)
+    def _recovery_code_dialog(self):
+        """Handle recovery code entry."""
+        if not has_recovery_codes():
+            messagebox.showerror(
+                "No Recovery Codes",
+                "No recovery codes available. You must use your master password.",
+                parent=self.root
+            )
+            return
+        code = simpledialog.askstring(
+            "Recovery Code",
+            "Enter one of your recovery codes (format: XXXX-XXXX-XXXX):",
+            parent=self.root
+        )
+        if not code:
+            return
+        master_pw = verify_recovery_code(code.upper())
+        if master_pw:
+            messagebox.showinfo(
+                "Recovery Successful",
+                "Recovery code accepted! Unlocking vault...",
+                parent=self.root
+            )
+            self.master_password_var.set(master_pw)
+            self.verify_master_password()
+        else:
+            messagebox.showerror(
+                "Invalid Code",
+                "Recovery code is invalid or already used.\n"
+                "Please try again or use your master password.",
+                parent=self.root
+            )
 
-        tk.Button(
-            btn_frame, 
-            text="🔓 Submit", 
-            command=self.verify_master_password, 
-            bg=self.primary_color, 
-            fg="white", 
-            font=("Helvetica", 12, "bold"), 
-            relief="raised", 
-            width=15
-        ).grid(row=0, column=0, padx=10)
-
-        if FACE_RECOGNITION_AVAILABLE and self.face_auth.is_registered():
-            tk.Button(
-                btn_frame, 
-                text="📸 Use Face", 
-                command=self.face_login_screen, 
-                bg=self.face_auth_color, 
-                fg="white", 
-                font=("Helvetica", 12, "bold"), 
-                relief="raised", 
-                width=15
-            ).grid(row=0, column=1, padx=10)
-
-    def verify_master_password(self):
-        """Verify master password and load vault."""
+    def verify_master_password(self, first_run=False):
+        self._update_activity()
         pw = self.master_password_var.get()
         if not pw:
-            messagebox.showerror("Error", "❌ Please enter a password.")
+            messagebox.showerror("Error", "Please enter a password.", parent=self.root)
             return
+        if not os.path.exists(MASTER_HASH_FILE) or first_run:
+            confirm = simpledialog.askstring(
+                "Set Master Password",
+                "Confirm master password:",
+                show="*", parent=self.root
+            )
+            if not confirm:
+                return
+            if pw != confirm:
+                messagebox.showerror("Error", "Passwords do not match.", parent=self.root)
+                return
+            save_master_password(pw)
 
-        if not verify_master_password(pw):
-            messagebox.showerror("Access Denied", "❌ Incorrect master password.")
+            # Generate recovery codes on first setup
+            codes = generate_recovery_codes(pw)
+            codes_text = "\n".join(f"  {c}" for c in codes)
+            messagebox.showinfo(
+                "Recovery Codes",
+                "YOUR RECOVERY CODES (save these somewhere safe!):\n\n"
+                f"{codes_text}\n\n"
+                "Each code can be used ONCE to access your vault\n"
+                "if you forget your master password.",
+                parent=self.root
+            )
+        elif not verify_master_password(pw):
+            messagebox.showerror("Access Denied", "Incorrect master password.", parent=self.root)
             return
-
+        self.master_pw = pw
         self.key = derive_key(pw)
         try:
             self.vault = load_vault(self.key)
-        except Exception:
-            messagebox.showerror("Error", "❌ Vault corrupted or invalid password.")
+        except Exception as e:
+            logger.error(f"Vault load failed: {e}")
+            messagebox.showerror("Error", "Vault corrupted or invalid password.", parent=self.root)
             return
-
+        # Save vault key for face unlock if face is enrolled
+        if is_face_registered():
+            save_vault_key_for_face(self.key)
         self.main_screen()
 
-    # ==================== MAIN SCREEN ====================
+    # ====== MAIN SCREEN ======
 
     def main_screen(self):
-        """Main password manager screen."""
-        self.clear_screen()
+        self._clear_screen()
+        self.root.title(f"🔐 {APP_NAME}")
 
-        # Search Bar
-        search_frame = tk.Frame(self.root, bg=self.bg_color)
-        search_frame.pack(pady=10, padx=10, fill="x")
+        header = tk.Frame(self.root, bg=HEADER_TEAL, height=56)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text="🔐  Anay's Password Vault", font=(self.font_normal[0], 16, "bold"), fg=BG_WHITE, bg=HEADER_TEAL).pack(side=tk.LEFT, padx=20, pady=12)
+        tk.Button(header, text="🔒 Lock", command=self._lock_vault, bg=HEADER_TEAL, fg=BG_WHITE, font=(self.font_normal[0], 10), bd=0, padx=12, cursor="hand2", activebackground="#2E7D7B").pack(side=tk.RIGHT, padx=15, pady=10)
 
-        tk.Label(search_frame, text="🔍 Search:", font=self.font, bg=self.bg_color).pack(side=tk.LEFT, padx=5)
+        # -- Search Bar --
+        search_bg = tk.Frame(self.root, bg=BG_WHITE, highlightbackground=BORDER, highlightthickness=1)
+        search_bg.pack(fill="x", padx=15, pady=(12, 5))
+        tk.Label(search_bg, text="🔍  ", font=(self.font_normal[0], 13), bg=BG_WHITE).pack(side=tk.LEFT, padx=(10, 0))
         self.search_var = tk.StringVar()
-        search_entry = tk.Entry(search_frame, textvariable=self.search_var, font=self.font, bd=2)
-        search_entry.pack(side=tk.LEFT, padx=5, fill="x", expand=True)
-        search_entry.bind("<KeyRelease>", lambda event: self.refresh_tree())
+        search_entry = tk.Entry(search_bg, textvariable=self.search_var, font=self.font_normal, bd=0, highlightthickness=0, bg=BG_WHITE)
+        search_entry.pack(side=tk.LEFT, fill="x", expand=True, padx=(0, 5), pady=8)
+        search_entry.bind("<KeyRelease>", lambda e: self.refresh_tree())
+        clear_lbl = tk.Label(search_bg, text="✕", font=(self.font_normal[0], 12), fg=TEXT_GREY, bg=BG_WHITE, cursor="hand2")
+        clear_lbl.pack(side=tk.RIGHT, padx=(0, 10))
+        clear_lbl.bind("<Button-1>", lambda e: [self.search_var.set(""), self.refresh_tree(), search_entry.focus_set()])
 
-        # Treeview
-        self.tree = ttk.Treeview(
-            self.root, 
-            columns=("Service", "Username", "Password", "Action"), 
-            show="headings"
-        )
-        self.tree.heading("Service", text="Service")
-        self.tree.heading("Username", text="Username")
+        self.count_label = tk.Label(self.root, text="", font=self.font_small, fg=TEXT_GREY, bg=BG_LIGHT)
+        self.count_label.pack(anchor="w", padx=18, pady=(2, 0))
+
+        tree_frame = tk.Frame(self.root, bg=BG_WHITE, highlightbackground=BORDER, highlightthickness=1)
+        tree_frame.pack(fill="both", expand=True, padx=15, pady=(5, 5))
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
+        self.tree = ttk.Treeview(tree_frame, columns=("Service", "Username", "Password", "Action"), show="headings", yscrollcommand=vsb.set, xscrollcommand=hsb.set, selectmode="browse")
+        vsb.config(command=self.tree.yview)
+        hsb.config(command=self.tree.xview)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        self.tree.pack(side="left", fill="both", expand=True)
+
+        self.tree.heading("Service", text="  Service", command=lambda: self._sort_tree("Service"))
+        self.tree.heading("Username", text="Username", command=lambda: self._sort_tree("Username"))
         self.tree.heading("Password", text="Password")
-        self.tree.heading("Action", text="Action")
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.tree.heading("Action", text="Show/Hide")
+        self.tree.column("Service", width=200, minwidth=100, anchor="w")
+        self.tree.column("Username", width=180, minwidth=100, anchor="w")
+        self.tree.column("Password", width=140, minwidth=100, anchor="center")
+        self.tree.column("Action", width=100, minwidth=80, anchor="center")
+
+        self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
+        self.tree.bind("<Double-1>", lambda e: self._edit_selected())
+        self.tree.bind("<Delete>", lambda e: self.delete_selected())
+        self.tree.bind("<Return>", lambda e: self.copy_selected_password())
+
+        toolbar = tk.Frame(self.root, bg=BG_LIGHT)
+        toolbar.pack(pady=(5, 8))
+        btn_s = {"bd": 0, "fg": BG_WHITE, "font": self.font_button, "padx": 14, "pady": 6, "cursor": "hand2"}
+        tk.Button(toolbar, text="➕  Add New", bg=PRIMARY, command=self.add_entry, **btn_s).pack(side=tk.LEFT, padx=3)
+        tk.Button(toolbar, text="📋  Copy", bg=SECONDARY, command=self.copy_selected_password, **btn_s).pack(side=tk.LEFT, padx=3)
+        tk.Button(toolbar, text="🔁  Generate", bg=PRIMARY, command=self.add_entry_with_password, **btn_s).pack(side=tk.LEFT, padx=3)
+        tk.Button(toolbar, text="✏️  Edit", bg=WARNING, command=self._edit_selected, **btn_s).pack(side=tk.LEFT, padx=3)
+        tk.Button(toolbar, text="🗑️  Delete", bg=DANGER, command=self.delete_selected, **btn_s).pack(side=tk.LEFT, padx=3)
+        tk.Frame(toolbar, bg=BORDER, width=1, height=24).pack(side=tk.LEFT, padx=6)
+        tk.Button(toolbar, text="📤  Export", bg=HEADER_TEAL, command=self.export_csv, **btn_s).pack(side=tk.LEFT, padx=3)
+        tk.Button(toolbar, text="📥  Import", bg=HEADER_TEAL, command=self.import_csv, **btn_s).pack(side=tk.LEFT, padx=3)
+
+        status_bar = tk.Frame(self.root, bg=BG_WHITE, highlightbackground=BORDER, highlightthickness=1)
+        status_bar.pack(side="bottom", fill="x")
+        self.status_text = tk.StringVar(value="Ready")
+        tk.Label(status_bar, textvariable=self.status_text, font=self.font_small, fg=TEXT_GREY, bg=BG_WHITE, anchor="w").pack(side=tk.LEFT, padx=12, pady=4)
+        self.badge_entries = tk.Label(status_bar, text="", font=self.font_small, fg=PRIMARY_DARK, bg=BG_WHITE)
+        self.badge_entries.pack(side=tk.RIGHT, padx=12, pady=4)
+
+        self.root.bind("<Control-f>", lambda e: search_entry.focus_set())
+        self.root.bind("<Control-n>", lambda e: self.add_entry())
+        self.root.bind("<Control-c>", lambda e: self.copy_selected_password())
+        self.root.bind("<Control-e>", lambda e: self._edit_selected())
+        self.root.bind("<Control-x>", lambda e: self.export_csv())
 
         self.refresh_tree()
-
-        # Main action buttons
-        btn_frame = tk.Frame(self.root, bg=self.bg_color)
-        btn_frame.pack(pady=10)
-
-        tk.Button(
-            btn_frame, text="➕ Add New", command=self.add_entry,
-            bg=self.primary_color, fg="white", font=self.font, relief="raised"
-        ).grid(row=0, column=0, padx=5)
-        
-        tk.Button(
-            btn_frame, text="📋 Copy Password", command=self.copy_selected_password,
-            bg=self.button_color, fg="white", font=self.font, relief="raised"
-        ).grid(row=0, column=1, padx=5)
-        
-        tk.Button(
-            btn_frame, text="🔁 Generate & Copy", command=self.gen_and_copy,
-            bg=self.primary_color, fg="white", font=self.font, relief="raised"
-        ).grid(row=0, column=2, padx=5)
-        
-        tk.Button(
-            btn_frame, text="🗑️ Delete", command=self.delete_selected,
-            bg="#f44336", fg="white", font=self.font, relief="raised"
-        ).grid(row=0, column=3, padx=5)
-
-        # Settings buttons
-        settings_frame = tk.Frame(self.root, bg=self.bg_color)
-        settings_frame.pack(pady=5)
-
-        if FACE_RECOGNITION_AVAILABLE:
-            tk.Button(
-                settings_frame, text="📸 Face Auth Settings", command=self.manage_face_auth,
-                bg=self.face_auth_color, fg="white", font=("Helvetica", 11), relief="raised"
-            ).grid(row=0, column=0, padx=5)
-        
-        tk.Button(
-            settings_frame, text="🔒 Lock", command=self.lock_vault,
-            bg="#9E9E9E", fg="white", font=("Helvetica", 11), relief="raised"
-        ).grid(row=0, column=1, padx=5)
-
-    # ==================== FACE AUTH SETTINGS ====================
-
-    def manage_face_auth(self):
-        """Face authentication settings dialog."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("📸 Face Auth Settings")
-        dialog.geometry("450x550")
-        dialog.configure(bg=self.bg_color)
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        # Header
-        tk.Label(
-            dialog,
-            text="📸 Face Authentication",
-            font=("Helvetica", 16, "bold"),
-            bg=self.bg_color,
-            fg=self.header_color
-        ).pack(pady=15)
-
-        # Status
-        status = self.face_auth.get_status()
-        
-        status_frame = tk.LabelFrame(dialog, text="Status", bg=self.bg_color)
-        status_frame.pack(pady=10, fill="x", padx=20)
-        
-        status_text = (
-            f"Face: {'✅ Registered' if status['face_registered'] else '❌ Not registered'} "
-            f"({status['face_samples']} samples)\n"
-            f"Quick PIN: {'✅ Enabled' if status['pin_enabled'] else '❌ Disabled'}\n"
-            f"Liveness: {'✅ Enabled' if status['liveness_enabled'] else '❌ Disabled'} "
-            f"({status['blinks_required']} blinks)\n"
-            f"Security: {status['security_name']} ({status['security_level']*100:.0f}%)\n"
-            f"PIN Unlock: ≥{status['face_only_threshold']:.0f}% confidence"
-        )
-        
-        tk.Label(status_frame, text=status_text, font=("Helvetica", 10),
-                bg=self.bg_color, justify="left").pack(pady=10, padx=10)
-
-        # Quick PIN Section
-        pin_frame = tk.LabelFrame(dialog, text="🔢 Quick PIN", bg=self.bg_color)
-        pin_frame.pack(pady=10, fill="x", padx=20)
-        
-        if status['pin_enabled']:
-            tk.Label(pin_frame, text="Quick PIN is enabled", bg=self.bg_color).pack(pady=5)
-            
-            def disable_pin():
-                if messagebox.askyesno("Disable PIN", "Disable Quick PIN?"):
-                    self.face_auth.disable_quick_pin()
-                    dialog.destroy()
-                    self.manage_face_auth()
-            
-            tk.Button(pin_frame, text="Disable PIN", command=disable_pin,
-                    bg="#f44336", fg="white").pack(pady=5)
-        else:
-            tk.Label(pin_frame, text="Setup 4-6 digit PIN:", bg=self.bg_color).pack(pady=5)
-            
-            pin_var = tk.StringVar()
-            pin_entry = tk.Entry(pin_frame, textvariable=pin_var, show="*", width=10, justify="center")
-            pin_entry.pack(pady=5)
-            
-            def setup_pin():
-                pin = pin_var.get()
-                success, msg = self.face_auth.setup_quick_pin(pin)
-                if success:
-                    messagebox.showinfo("Success", "✅ PIN setup complete!")
-                    dialog.destroy()
-                    self.manage_face_auth()
-                else:
-                    messagebox.showerror("Error", msg)
-            
-            tk.Button(pin_frame, text="Setup PIN", command=setup_pin,
-                    bg=self.primary_color, fg="white").pack(pady=5)
-
-        # Liveness Section
-        liveness_frame = tk.LabelFrame(dialog, text="👁️ Liveness Detection", bg=self.bg_color)
-        liveness_frame.pack(pady=10, fill="x", padx=20)
-        
-        liveness_var = tk.BooleanVar(value=status['liveness_enabled'])
-        tk.Checkbutton(
-            liveness_frame,
-            text="Enable blink detection",
-            variable=liveness_var,
-            bg=self.bg_color,
-            command=lambda: self.face_auth.set_liveness_enabled(liveness_var.get())
-        ).pack(pady=5)
-        
-        blinks_frame = tk.Frame(liveness_frame, bg=self.bg_color)
-        blinks_frame.pack(pady=5)
-        
-        tk.Label(blinks_frame, text="Blinks required:", bg=self.bg_color).pack(side="left")
-        blinks_var = tk.IntVar(value=status['blinks_required'])
-        tk.Spinbox(blinks_frame, from_=1, to=5, textvariable=blinks_var, width=5,
-                command=lambda: self.face_auth.set_blinks_required(blinks_var.get())).pack(side="left", padx=5)
-
-        # Security Level
-        security_frame = tk.LabelFrame(dialog, text="🔒 Security Level", bg=self.bg_color)
-        security_frame.pack(pady=10, fill="x", padx=20)
-        
-        level_label = tk.Label(security_frame,
-            text=f"{status['security_name']} ({status['security_level']*100:.0f}%)",
-            bg=self.bg_color)
-        level_label.pack(pady=5)
-        
-        security_var = tk.DoubleVar(value=status['security_level'] * 100)
-        
-        def update_level(*args):
-            val = security_var.get()
-            name = "Maximum" if val >= 90 else "High" if val >= 80 else "Medium" if val >= 60 else "Low"
-            level_label.config(text=f"{name} ({val:.0f}%)")
-        
-        tk.Scale(security_frame, from_=50, to=95, orient="horizontal",
-                variable=security_var, command=update_level, length=200,
-                showvalue=False, bg=self.bg_color).pack(pady=5)
-        
-        tk.Button(security_frame, text="Apply",
-                command=lambda: self.face_auth.set_security_level(security_var.get()/100),
-                bg=self.primary_color, fg="white").pack(pady=5)
-
-        # Actions
-        actions_frame = tk.Frame(dialog, bg=self.bg_color)
-        actions_frame.pack(pady=15)
-        
-        def re_register():
-            dialog.destroy()
-            if messagebox.askyesno("Re-register", "Delete face data and re-register?"):
-                self.face_auth.reset_face_data()
-                self.face_setup_screen()
-        
-        def reset_all():
-            if messagebox.askyesno("Reset ALL", "Delete ALL face auth data?"):
-                self.face_auth.reset_all_data()
-                dialog.destroy()
-                messagebox.showinfo("Done", "All data reset.")
-        
-        tk.Button(actions_frame, text="🔄 Re-register", command=re_register,
-                bg=self.face_auth_color, fg="white", width=15).grid(row=0, column=0, padx=5, pady=5)
-        tk.Button(actions_frame, text="📋 History", 
-                command=lambda: self.show_auth_history(dialog),
-                bg="#607D8B", fg="white", width=15).grid(row=0, column=1, padx=5, pady=5)
-        tk.Button(actions_frame, text="🗑️ Reset All", command=reset_all,
-                bg="#f44336", fg="white", width=15).grid(row=1, column=0, padx=5, pady=5)
-        tk.Button(actions_frame, text="Close", command=dialog.destroy,
-                bg="#9E9E9E", fg="white", width=15).grid(row=1, column=1, padx=5, pady=5)
+        self._update_status()
 
 
-    def show_auth_history(self, parent):
-        """Show authentication history."""
-        history = self.face_auth.get_auth_history(20)
-        
-        dialog = tk.Toplevel(parent)
-        dialog.title("Auth History")
-        dialog.geometry("500x300")
-        
-        text = tk.Text(dialog, font=("Courier", 9))
-        text.pack(fill="both", expand=True, padx=10, pady=10)
-        text.insert("1.0", "".join(history) if history else "No history")
-        text.config(state="disabled")
-        
-        tk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=5)
-
-    def lock_vault(self):
-        """Lock the vault and return to login."""
-        self.vault = {}
-        self.key = None
-        self.revealed_rows = {}
-        
-        if FACE_RECOGNITION_AVAILABLE and self.face_auth.is_registered():
-            self.face_login_screen()
-        else:
-            self.login_screen()
-
-    # ==================== VAULT OPERATIONS ====================
+    # ====== TREE METHODS ======
 
     def refresh_tree(self):
-        """Refresh the password tree view."""
+        self._update_activity()
         self.tree.delete(*self.tree.get_children())
         query = self.search_var.get().lower().strip()
-
+        items = []
         for service, creds in self.vault.items():
             if query in service.lower() or query in creds["username"].lower():
-                is_revealed = self.revealed_rows.get(service, False)
-                password = creds["password"] if is_revealed else "●●●●●●●●"
-                action = "Hide" if is_revealed else "Show"
-                self.tree.insert("", "end", iid=service, values=(service, creds["username"], password, action))
+                items.append((service, creds))
+        if self.sort_column == "Service":
+            items.sort(key=lambda x: x[0].lower(), reverse=self.sort_reverse)
+        elif self.sort_column == "Username":
+            items.sort(key=lambda x: x[1]["username"].lower(), reverse=self.sort_reverse)
+        for service, creds in items:
+            is_revealed = self.revealed_rows.get(service, False)
+            password = creds["password"] if is_revealed else "●●●●●●●●"
+            action = "🙈 Hide" if is_revealed else "👁 Show"
+            self.tree.insert("", "end", iid=service, values=(f"  {service}", creds["username"], password, action))
+        self._update_status()
 
-        self.tree.bind("<ButtonRelease-1>", self.toggle_password)
+    def _sort_tree(self, col):
+        if self.sort_column == col:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = col
+            self.sort_reverse = False
+        self.refresh_tree()
 
-    def toggle_password(self, event=None):
-        """Toggle password visibility in the tree."""
+    def _on_tree_click(self, event):
         selected_item = self.tree.selection()
         if not selected_item:
             return
-
-        item_id = selected_item[0]
         col = self.tree.identify_column(event.x)
-
         if col != "#4":
             return
-
-        service_key = item_id
-
-        if service_key not in self.vault:
+        service_key = selected_item[0]
+        clean_key = service_key.strip()
+        if clean_key not in self.vault:
+            messagebox.showerror("Error", "Service not found in vault.", parent=self.root)
             return
-
-        is_revealed = self.revealed_rows.get(service_key, False)
-
+        is_revealed = self.revealed_rows.get(clean_key, False)
         if is_revealed:
-            self.revealed_rows[service_key] = False
-            self.tree.item(service_key, values=(
-                service_key,
-                self.vault[service_key]["username"],
-                "●●●●●●●●",
-                "Show"
-            ))
+            self.revealed_rows[clean_key] = False
+            self.tree.item(service_key, values=(service_key, self.vault[clean_key]["username"], "●●●●●●●●", "👁 Show"))
         else:
-            self.revealed_rows[service_key] = True
-            self.tree.item(service_key, values=(
-                service_key,
-                self.vault[service_key]["username"],
-                self.vault[service_key]["password"],
-                "Hide"
-            ))
+            self.revealed_rows[clean_key] = True
+            self.tree.item(service_key, values=(service_key, self.vault[clean_key]["username"], self.vault[clean_key]["password"], "🙈 Hide"))
+        self._update_status()
+
+
+    # ====== ACTIONS ======
 
     def add_entry(self):
-        """Add a new password entry."""
-        service = simpledialog.askstring("Service Name", "Enter service name:")
-        if not service:
-            return
-        username = simpledialog.askstring("Username", "Enter username:")
-        if username is None:
-            return
-        password = simpledialog.askstring("Password", "Enter password:", show="*")
-        if password is None:
-            return
+        self._update_activity()
+        def on_save(fields, dialog):
+            service = fields["service"].get().strip()
+            username = fields["username"].get().strip()
+            password = fields["password"].get()
+            if not service:
+                messagebox.showerror("Error", "Service name required.", parent=dialog)
+                return False
+            if service in self.vault:
+                if not messagebox.askyesno("Overwrite", f"'{service}' already exists. Overwrite?", parent=dialog):
+                    return False
+            self.vault[service] = {"username": username, "password": password}
+            save_vault(self.vault, self.key)
+            self.refresh_tree()
+            self.status_text.set(f"✅ Added '{service}'")
+        self._build_entry_dialog("➕ Add New Entry", "Add New Password Entry", [("Service Name", "service", ""), ("Username", "username", ""), ("Password", "password", "")], on_save)
 
-        self.vault[service] = {"username": username, "password": password}
-        save_vault(self.vault, self.key)
-        self.refresh_tree()
+    def add_entry_with_password(self):
+        self._update_activity()
+        generated = generate_password()
+        def on_save(fields, dialog):
+            service = fields["service"].get().strip()
+            username = fields["username"].get().strip()
+            password = fields["password"].get()
+            if not service:
+                messagebox.showerror("Error", "Service name required.", parent=dialog)
+                return False
+            if service in self.vault:
+                if not messagebox.askyesno("Overwrite", f"'{service}' already exists. Overwrite?", parent=dialog):
+                    return False
+            self.vault[service] = {"username": username, "password": password}
+            save_vault(self.vault, self.key)
+            self.refresh_tree()
+            self.status_text.set(f"✅ Added '{service}'")
+        self._build_entry_dialog("➕ Add Entry (with Password)", "Add New Password Entry",
+                                  [("Service Name", "service", ""),
+                                   ("Username", "username", ""),
+                                   ("Password", "password", generated)], on_save)
+
+    def _edit_selected(self):
+        self._update_activity()
+        selected = self.tree.focus()
+        if not selected:
+            messagebox.showwarning("No selection", "Please select an entry to edit.", parent=self.root)
+            return
+        service_key = selected.strip()
+        if service_key not in self.vault:
+            return
+        creds = self.vault[service_key]
+        def on_save(fields, dialog):
+            new_service = fields["service"].get().strip()
+            new_username = fields["username"].get().strip()
+            new_password = fields["password"].get()
+            if not new_service:
+                messagebox.showerror("Error", "Service name required.", parent=dialog)
+                return False
+            if new_service != service_key:
+                del self.vault[service_key]
+                self.revealed_rows.pop(service_key, None)
+                self.revealed_rows.pop(new_service, None)
+            self.vault[new_service] = {"username": new_username, "password": new_password}
+            save_vault(self.vault, self.key)
+            self.refresh_tree()
+            self.status_text.set(f"✏️ Updated '{new_service}'")
+        self._build_entry_dialog(f"✏️ Edit: {service_key}", f"Editing '{service_key}'", [("Service Name", "service", service_key), ("Username", "username", creds["username"]), ("Password", "password", creds["password"])], on_save)
+
 
     def copy_selected_password(self):
-        """Copy selected password to clipboard."""
+        self._update_activity()
         selected = self.tree.focus()
-        if selected:
-            pw = self.vault[selected]["password"]
-            pyperclip.copy(pw)
-            messagebox.showinfo("Copied", f"🔐 Password for '{selected}' copied!")
-        else:
-            messagebox.showwarning("No selection", "Please select an entry.")
-
-    def gen_and_copy(self):
-        """Generate a password and copy to clipboard."""
-        pwd = generate_password()
-        pyperclip.copy(pwd)
-        messagebox.showinfo("Generated", f"Password copied:\n\n{pwd}")
+        if not selected:
+            messagebox.showwarning("No selection", "Please select an entry.", parent=self.root)
+            return
+        service_key = selected.strip()
+        if service_key not in self.vault:
+            return
+        pw = self.vault[service_key]["password"]
+        pyperclip.copy(pw)
+        self.status_text.set(f"📋 Copied password for '{service_key}'")
+        logger.info(f"Password for '{service_key}' copied to clipboard.")
+        self._start_clipboard_clear_timer()
 
     def delete_selected(self):
-        """Delete selected password entry."""
+        self._update_activity()
         selected = self.tree.focus()
-        if selected:
-            if messagebox.askyesno("Delete", f"Delete '{selected}'?"):
-                del self.vault[selected]
-                save_vault(self.vault, self.key)
-                self.refresh_tree()
-                messagebox.showinfo("Deleted", f"'{selected}' deleted.")
+        if not selected:
+            messagebox.showwarning("No selection", "Please select an entry to delete.", parent=self.root)
+            return
+        service_key = selected.strip()
+        if service_key not in self.vault:
+            return
+        confirm = messagebox.askyesno("Delete", f"Are you sure you want to delete '{service_key}'?", parent=self.root)
+        if confirm:
+            del self.vault[service_key]
+            self.revealed_rows.pop(service_key, None)
+            save_vault(self.vault, self.key)
+            self.refresh_tree()
+            self.status_text.set(f"🗑️ Deleted '{service_key}'")
+
+    def export_csv(self):
+        self._update_activity()
+        if not self.vault:
+            messagebox.showinfo("Export", "No entries to export.", parent=self.root)
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            title="Export vault as CSV",
+            parent=self.root
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Service", "Username", "Password"])
+                for service, creds in sorted(self.vault.items()):
+                    writer.writerow([service, creds["username"], creds["password"]])
+            self.status_text.set(f"📤 Exported {len(self.vault)} entries to CSV")
+            logger.info(f"Vault exported to {path}")
+        except Exception as e:
+            messagebox.showerror("Export Failed", str(e), parent=self.root)
+
+    def import_csv(self):
+        self._update_activity()
+        path = filedialog.askopenfilename(
+            filetypes=[("CSV files", "*.csv")],
+            title="Import CSV into vault",
+            parent=self.root
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                count = 0
+                for row in reader:
+                    service = row.get("Service", "").strip()
+                    username = row.get("Username", "").strip()
+                    password = row.get("Password", "")
+                    if not service:
+                        continue
+                    self.vault[service] = {"username": username, "password": password}
+                    count += 1
+            save_vault(self.vault, self.key)
+            self.refresh_tree()
+            self.status_text.set(f"📥 Imported {count} entries from CSV")
+            logger.info(f"Imported {count} entries from {path}")
+        except Exception as e:
+            messagebox.showerror("Import Failed", str(e), parent=self.root)
+
+    def _lock_vault(self, auto=False):
+        if self.clipboard_timer:
+            self.root.after_cancel(self.clipboard_timer)
+            self.clipboard_timer = None
+        if auto:
+            pyperclip.copy("")
+            logger.info("Vault auto-locked due to inactivity.")
         else:
-            messagebox.showwarning("No selection", "Please select an entry.")
+            logger.info("Vault locked by user.")
+        self.key = None
+        self.master_pw = None
+        self.vault = {}
+        self.revealed_rows = {}
+        self._clear_screen()
+        self.login_screen()
 
+    def _start_clipboard_clear_timer(self):
+        if self.clipboard_timer:
+            self.root.after_cancel(self.clipboard_timer)
+        def _clear_clipboard():
+            pyperclip.copy("")
+            self.status_text.set("🧹 Clipboard cleared for security")
+            self.clipboard_timer = None
+        self.clipboard_timer = self.root.after(CLIPBOARD_CLEAR_SECONDS * 1000, _clear_clipboard)
 
-# ==================== MAIN ====================
+    def _password_strength(self, pwd: str) -> int:
+        score = 0
+        if len(pwd) >= 8:
+            score += 1
+        if len(pwd) >= 12:
+            score += 1
+        if re.search(r"[a-z]", pwd) and re.search(r"[A-Z]", pwd):
+            score += 1
+        if re.search(r"\d", pwd):
+            score += 1
+        if re.search(r"[!@#$%^&*(),.?\":{}|<>_\-]", pwd):
+            score += 1
+        return score
+
+    def _build_entry_dialog(self, title, header_text, fields_config, on_save):
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("420x420")
+        dialog.configure(bg=BG_WHITE)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        tk.Label(dialog, text=header_text, font=self.font_title, fg=HEADER_TEAL, bg=BG_WHITE).pack(pady=(15, 10))
+
+        fields = {}
+        for label, key, init_val in fields_config:
+            tk.Label(dialog, text=label, font=self.font_subtitle, fg=TEXT_DARK, bg=BG_WHITE, anchor="w").pack(fill="x", padx=20, pady=(5, 0))
+            entry = tk.Entry(dialog, font=self.font_normal, bd=1, relief="solid", highlightbackground=BORDER)
+            if init_val:
+                entry.insert(0, init_val)
+            entry.pack(fill="x", padx=20, pady=(0, 5), ipady=3)
+            fields[key] = entry
+
+        if "password" in fields:
+            fields["password"].config(show="*")
+            strength_label = tk.Label(dialog, text="", font=self.font_small, bg=BG_WHITE)
+            strength_label.pack()
+            gen_btn_frame = tk.Frame(dialog, bg=BG_WHITE)
+            gen_btn_frame.pack(fill="x", padx=20, pady=(0, 5))
+            tk.Button(gen_btn_frame, text="🔁  Generate Strong Password", bg=PRIMARY, fg=BG_WHITE, font=(self.font_normal[0], 9, "bold"), bd=0, padx=10, pady=3, cursor="hand2", command=lambda: self._fill_generated_password(fields["password"], strength_label)).pack(side=tk.LEFT)
+
+            def _check_strength(*args):
+                pw = fields["password"].get()
+                score = self._password_strength(pw)
+                if score < 2:
+                    strength_label.config(text="Weak", fg=DANGER)
+                elif score < 4:
+                    strength_label.config(text="Medium", fg=WARNING)
+                else:
+                    strength_label.config(text="Strong", fg=PRIMARY)
+            fields["password"].bind("<KeyRelease>", _check_strength)
+
+        btn_frame = tk.Frame(dialog, bg=BG_WHITE)
+        btn_frame.pack(pady=(10, 5))
+        tk.Button(btn_frame, text="💾  Save", bg=PRIMARY, fg=BG_WHITE, font=self.font_button, bd=0, padx=20, pady=6, cursor="hand2", activebackground=PRIMARY_DARK, command=lambda: self._save_entry_wrapper(dialog, fields, on_save)).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", bg=BG_LIGHT, fg=TEXT_DARK, font=self.font_normal, bd=0, padx=20, pady=4, cursor="hand2", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+        first_key = list(fields.keys())[0]
+        fields[first_key].focus_set()
+        return dialog, fields
+
+    def _fill_generated_password(self, password_entry, strength_label):
+        pwd = generate_password()
+        password_entry.delete(0, tk.END)
+        password_entry.insert(0, pwd)
+        score = self._password_strength(pwd)
+        if score < 2:
+            strength_label.config(text="Weak", fg=DANGER)
+        elif score < 4:
+            strength_label.config(text="Medium", fg=WARNING)
+        else:
+            strength_label.config(text="Strong", fg=PRIMARY)
+
+    def _save_entry_wrapper(self, dialog, fields, on_save):
+        result = on_save(fields, dialog)
+        if result is not False:
+            dialog.destroy()
+
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("Anay's Password Vault")
-    print("=" * 50)
-    
-    if FACE_RECOGNITION_AVAILABLE:
-        print("[OK] Face recognition available")
-    else:
-        print("[WARNING] Face recognition not available")
-        print("         Running in password-only mode")
-    
-    print()
-    
     root = tk.Tk()
-    root.geometry("800x650")
     app = PasswordManagerGUI(root)
     root.mainloop()
