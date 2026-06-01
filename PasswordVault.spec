@@ -20,7 +20,7 @@ a = Analysis(
         ('password_generator.py', '.'),
         ('face_auth.py', '.'),
     ] + _cascade_files,
-    hiddenimports=[],
+    hiddenimports=['cv2.face'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

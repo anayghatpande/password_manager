@@ -10,6 +10,7 @@ import time
 import hashlib
 import base64
 import cv2
+import cv2.face
 import numpy as np
 import tkinter as tk
 from tkinter import messagebox
