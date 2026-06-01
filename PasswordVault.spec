@@ -1,14 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import cv2
 
 block_cipher = None
 
+_cascade_dir = cv2.data.haarcascades
+_cascade_files = [
+    (os.path.join(_cascade_dir, "haarcascade_frontalface_alt2.xml"), os.path.join("cv2", "data")),
+    (os.path.join(_cascade_dir, "haarcascade_frontalface_default.xml"), os.path.join("cv2", "data")),
+]
 
 a = Analysis(
     ['gui_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('vault_core.py', '.'), ('password_generator.py', '.'), ('face_auth.py', '.')],
+    datas=[
+        ('vault_core.py', '.'),
+        ('password_generator.py', '.'),
+        ('face_auth.py', '.'),
+    ] + _cascade_files,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -5,6 +5,7 @@ Stores face encodings locally as an XML model.
 """
 
 import os
+import sys
 import time
 import hashlib
 import base64
@@ -26,7 +27,7 @@ CONFIDENCE_THRESHOLD = 70  # Lower = stricter authentication (0-100, 0=perfect m
 CONFIDENCE_AUTO_LOGIN = 60  # If confidence < this, skip master password entirely
 FACE_CAPTURE_DELAY = 3  # Seconds between face capture attempts
 BLUR_THRESHOLD = 80  # Lower = less tolerant of blur (Laplacian variance)
-ENROLL_SAMPLES = 50  # Number of face samples to capture for training
+ENROLL_SAMPLES = 25  # Number of face samples to capture for training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -48,6 +49,12 @@ def _load_face_cascade():
         cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml",
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
     ]
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+        paths.extend([
+            os.path.join(base, "cv2", "data", "haarcascade_frontalface_alt2.xml"),
+            os.path.join(base, "cv2", "data", "haarcascade_frontalface_default.xml"),
+        ])
     for p in paths:
         cascade = cv2.CascadeClassifier(p)
         if not cascade.empty():
