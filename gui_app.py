@@ -494,16 +494,15 @@ class PasswordManagerGUI:
                 from face_auth import FaceAuthDialog
                 fd = FaceAuthDialog(self.root)
                 if fd.run_enrollment():
-                    self.root.after(500, _wait_for_enroll(fd))
+                    self.root.after(500, lambda: _wait_for_enroll(fd))
 
             def _wait_for_enroll(fd):
                 def _check():
                     if is_face_registered():
-                        save_vault_key_for_face(self.key)
-                        messagebox.showinfo("Success", "Face enrolled successfully!",
-                                            parent=self.root)
-                    _next()
-                self.root.after(100, _check)
+                        _next()
+                    else:
+                        self.root.after(500, _check)
+                _check()
 
             tk.Button(btn_f, text="📸  Enroll Now", command=_do_enroll,
                       bg=HEADER_TEAL, fg=BG_WHITE, font=self.font_button,
